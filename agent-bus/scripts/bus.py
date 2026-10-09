@@ -197,6 +197,41 @@ def chat_verb(argv, cfg, root):
     return 0
 
 
+# Child output is UTF-8 (orca); the Windows locale codepage (cp1252) cannot decode it.
+TEXT = {'text': True, 'encoding': 'utf-8', 'errors': 'replace'}
+
+
+def orca_handle(stdout):
+    """The handle in `orca terminal create --json` output: result.terminal.handle, result.handle or handle."""
+    try:
+        res = json.loads(stdout or '{}')
+    except ValueError:
+        return None
+    if not isinstance(res, dict):
+        return None
+    result = res.get('result') if isinstance(res.get('result'), dict) else {}
+    term = result.get('terminal') if isinstance(result.get('terminal'), dict) else {}
+    return term.get('handle') or result.get('handle') or res.get('handle') or None
+
+
+def orca_titled(title):
+    """Handles of the orca terminals titled `title`."""
+    import subprocess
+    r = subprocess.run(['orca', 'terminal', 'list', '--json'], capture_output=True, **TEXT)
+    try:
+        terms = (json.loads(r.stdout or '{}').get('result') or {}).get('terminals') or []
+    except (ValueError, AttributeError):
+        terms = []
+    return {t['handle'] for t in terms if isinstance(t, dict) and t.get('title') == title and t.get('handle')}
+
+
+def orca_close_by_title(title, before=frozenset()):
+    """Close the terminals titled `title` that were not in `before`: a create whose handle could not be read."""
+    import subprocess
+    for h in sorted(orca_titled(title) - set(before)):
+        subprocess.run(['orca', 'terminal', 'close', '--terminal', h, '--tab'], capture_output=True)
+
+
 def tui_verb(argv, cfg, root):
     """tui [--open] [--as ROLE] [--theme T]: the terminal client; --open starts it in a new terminal."""
     tui_dir = HERE.parent / 'tui'
@@ -216,16 +251,17 @@ def tui_verb(argv, cfg, root):
     import shutil
     import subprocess
     if cfg['backend'] == 'orca' and shutil.which('orca'):
-        r = subprocess.run(['orca', 'terminal', 'create', '--title', 'bus-tui', '--json'], capture_output=True, text=True)
-        try:
-            handle = json.loads(r.stdout)['result']['handle']
+        before = orca_titled('bus-tui')
+        r = subprocess.run(['orca', 'terminal', 'create', '--title', 'bus-tui', '--json'], capture_output=True, **TEXT)
+        handle = orca_handle(r.stdout)
+        if handle:
             line = ' '.join(f'"{c}"' for c in cmd)
             subprocess.run(['orca', 'terminal', 'send', '--terminal', handle, '--text', line, '--enter'],
                            capture_output=True)
             print(f'tui: opened in Orca terminal {handle}')
             return 0
-        except (ValueError, KeyError, TypeError):
-            pass
+        if r.returncode == 0:
+            orca_close_by_title('bus-tui', before)  # the tab may exist: never leave an orphan
     if os.environ.get('TMUX') and shutil.which('tmux'):
         subprocess.run(['tmux', 'new-window', '-n', 'bus-tui', '-e', env_dir] + cmd)
         print('tui: opened in a new tmux window')

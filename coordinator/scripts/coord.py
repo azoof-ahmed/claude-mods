@@ -68,6 +68,10 @@ FLOATS = ('minFreeRamGb',)
 PATHS = ('busDir', 'trackerDb', 'rulesFile', 'briefsDir', 'cardsDir', 'reportsDir')
 
 
+# Child output is UTF-8 (orca, claude, the bus); the Windows locale codepage (cp1252) cannot decode it.
+TEXT = {'text': True, 'encoding': 'utf-8', 'errors': 'replace'}
+
+
 def env_key(k):
     return 'COORD_' + re.sub(r'(?<!^)(?=[A-Z])', '_', k).upper()
 
@@ -195,7 +199,7 @@ def bus(cfg, *args, check=False):
     cli = bus_cli()
     if not cli or not cfg.path('busDir').is_dir():
         return None
-    r = subprocess.run(cli + ['--dir', str(cfg.path('busDir'))] + list(args), capture_output=True, text=True,
+    r = subprocess.run(cli + ['--dir', str(cfg.path('busDir'))] + list(args), capture_output=True, **TEXT,
                        cwd=cfg.root)
     if check and r.returncode != 0:
         print(f'coordinator: bus {" ".join(args)}: {r.stderr.strip()}', file=sys.stderr)
@@ -249,11 +253,11 @@ def worker_command(cfg, role, brief, model=None):
     return cfg['workerCommand'].format(**vals)
 
 
-def run(argv, dry, **kw):
+def run(argv, dry=False, **kw):
     if dry:
         print('would run: ' + ' '.join(shlex.quote(a) for a in argv))
         return subprocess.CompletedProcess(argv, 0, '{}', '')
-    return subprocess.run(argv, capture_output=True, text=True, **kw)
+    return subprocess.run(argv, capture_output=True, **TEXT, **kw)
 
 
 def orca_handle(stdout):
@@ -272,19 +276,24 @@ def orca_handle(stdout):
     return term.get('handle') or result.get('handle') or res.get('handle') or None
 
 
-def orca_close_by_title(repo, title, dry=False):
-    """Close every orca terminal titled `title` in `repo`; used when a create worked but its handle was unreadable."""
+def orca_titled(repo, title, dry=False):
+    """Handles of the orca terminals titled `title` in `repo`."""
     r = run(['orca', 'terminal', 'list', '--worktree', f'path:{repo}', '--json'], dry)
     try:
         res = json.loads(r.stdout or '{}')
         terms = (res.get('result') or {}).get('terminals') or res.get('terminals') or []
     except (ValueError, AttributeError):
         terms = []
+    return {t['handle'] for t in terms if isinstance(t, dict) and t.get('title') == title and t.get('handle')}
+
+
+def orca_close_by_title(repo, title, before=frozenset(), dry=False):
+    """Close the orca terminals titled `title` in `repo` that were not in `before`: the tab of a create whose
+    handle could not be read. Tabs that already had the title are left alone."""
     closed = 0
-    for t in terms:
-        if isinstance(t, dict) and t.get('title') == title and t.get('handle'):
-            if run(['orca', 'terminal', 'close', '--terminal', t['handle'], '--tab'], dry).returncode == 0:
-                closed += 1
+    for h in sorted(orca_titled(repo, title, dry) - set(before)):
+        if run(['orca', 'terminal', 'close', '--terminal', h, '--tab'], dry).returncode == 0:
+            closed += 1
     return closed
 
 
@@ -292,12 +301,13 @@ def open_terminal(cfg, role, repo, cmd, dry=False):
     """Start `cmd` for `role` in a new terminal; returns (handle, how). The worker's env carries AGENT_BUS_ROLE."""
     b = cfg['backend']
     if b == 'orca':
+        before = set() if dry else orca_titled(repo, role)
         r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', role,
                  '--command', with_env(cfg, role, cmd), '--json'], dry)
         handle = orca_handle(r.stdout)
         if not handle and not dry:
             if r.returncode == 0:
-                orca_close_by_title(repo, role)  # the tab may exist: never leave an orphan
+                orca_close_by_title(repo, role, before)  # the tab may exist: never leave an orphan
             raise SystemExit(f'coordinator: orca terminal create failed: {r.stderr.strip() or r.stdout.strip()}')
         return handle, 'orca'
     if b == 'tmux':
@@ -382,7 +392,7 @@ def cmd_init(cfg, args):
     cli = bus_cli()
     if cli:
         r = subprocess.run(cli + ['--dir', str(cfg.path('busDir')), 'init', '--roles', roles], capture_output=True,
-                           text=True, cwd=cfg.root)
+                           **TEXT, cwd=cfg.root)
         made.append('bus: ' + (r.stdout.strip() or r.stderr.strip()))
     else:
         made.append('bus: agent-bus plugin not found; messages fall back to files in ' + rel(cfg, cfg.path('reportsDir')))
@@ -634,7 +644,7 @@ def free_ram_gb():
     except OSError:
         pass
     try:
-        out = subprocess.run(['vm_stat'], capture_output=True, text=True).stdout
+        out = subprocess.run(['vm_stat'], capture_output=True, **TEXT).stdout
         page = int(re.search(r'page size of (\d+)', out).group(1))
         pages = sum(int(re.search(rf'{k}:\s+(\d+)', out).group(1)) for k in ('Pages free', 'Pages inactive'))
         return pages * page / 2 ** 30
@@ -664,7 +674,7 @@ def battery():
         except (OSError, ValueError):
             pass
     if shutil.which('pmset'):
-        out = subprocess.run(['pmset', '-g', 'batt'], capture_output=True, text=True).stdout
+        out = subprocess.run(['pmset', '-g', 'batt'], capture_output=True, **TEXT).stdout
         m = re.search(r'(\d+)%', out)
         if m:
             return int(m.group(1)), "AC Power" in out
@@ -713,19 +723,55 @@ def cmd_preflight(cfg, args):
 
 # ---- usage: readings, the probe, the watcher
 
-USAGE_RE = {
-    'session': re.compile(r'current session[^\n]*?(?:\n[^\n%]*?)?(\d{1,3})\s*%\s*used', re.I),
-    'week': re.compile(r'current week \(all models\)[^\n]*?(?:\n[^\n%]*?)?(\d{1,3})\s*%\s*used', re.I),
-}
+USAGE_HEADINGS = {'session': re.compile(r'current session', re.I),
+                  'week': re.compile(r'current week \(all models\)', re.I)}
+USED_RE = re.compile(r'(\d{1,3}(?:\.\d+)?)\s*%\s*used', re.I)
+PROBE_START_S = 20      # claude's start-up before /usage is typed
+PROBE_TIMEOUT_S = 60    # how long the screen is polled for the week line
+PROBE_POLL_S = 2
 
 
 def parse_usage(text):
     """{'session': int|None, 'week': int|None} from the text of Claude Code's /usage screen."""
+    lines = [ln.strip() for ln in (text or '').replace('\r', '').split('\n')]
     out = {}
-    for k, rx in USAGE_RE.items():
-        m = rx.search(text or '')
-        out[k] = int(m.group(1)) if m else None
+    for k, heading in USAGE_HEADINGS.items():
+        out[k] = None
+        for i, ln in enumerate(lines):
+            if not heading.search(ln):
+                continue
+            m = USED_RE.search(ln)  # same line, else the next non-empty line (the bar and `N% used`)
+            for nxt in lines[i + 1:i + 4]:
+                if m or (nxt and heading.search(nxt)):
+                    break
+                m = USED_RE.search(nxt) if nxt else None
+            if m:
+                out[k] = int(float(m.group(1)))
+                break
     return out
+
+
+def wait_for_usage(read_screen, timeout=None):
+    """Poll `read_screen()` until the week's `N% used` is on it (or the timeout); returns the last screen text."""
+    deadline = time.time() + (PROBE_TIMEOUT_S if timeout is None else timeout)
+    screen = ''
+    while True:
+        screen = read_screen() or ''
+        if parse_usage(screen)['week'] is not None or time.time() >= deadline:
+            return screen
+        time.sleep(PROBE_POLL_S)
+
+
+def orca_screen(h, dry=False):
+    """The rendered screen of orca terminal `h` as text."""
+    out = run(['orca', 'terminal', 'read', '--terminal', h, '--screen', '--json'], dry).stdout
+    try:
+        tail = ((json.loads(out or '{}').get('result') or {}).get('terminal') or {}).get('tail')
+    except (ValueError, AttributeError):
+        return out or ''
+    if isinstance(tail, list):
+        return '\n'.join(str(x) for x in tail)
+    return tail if isinstance(tail, str) else (out or '')
 
 
 def usage_file(cfg):
@@ -774,25 +820,27 @@ def probe_usage(cfg, dry=False):
     b = cfg['backend']
     repo = cfg.repos()[0]
     if b == 'orca':
-        r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', 'usage-probe', '--json'], dry)
-        h = orca_handle(r.stdout)
         if dry:
+            run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', 'usage-probe', '--json'], dry)
             return {'session': None, 'week': None}
-        if not h:
-            if r.returncode == 0:
-                orca_close_by_title(repo, 'usage-probe')  # the tab may exist: never leave an orphan
-            raise SystemExit('coordinator: usage probe: orca could not open a terminal')
+        h = None
+        before = orca_titled(repo, 'usage-probe')
         try:
-            run(['orca', 'terminal', 'send', '--terminal', h, '--text', cfg['probeCommand'], '--enter'], dry)
-            time.sleep(20)
-            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '/usage', '--enter'], dry)
-            time.sleep(12)
-            screen = run(['orca', 'terminal', 'read', '--terminal', h, '--screen'], dry).stdout
-            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '\x1b'], dry)
-            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '/exit', '--enter'], dry)
-            time.sleep(4)
-        finally:
-            run(['orca', 'terminal', 'close', '--terminal', h, '--tab'], dry)
+            r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', 'usage-probe', '--json'])
+            h = orca_handle(r.stdout)
+            if not h:
+                raise SystemExit('coordinator: usage probe: orca could not open a terminal')
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', cfg['probeCommand'], '--enter'])
+            time.sleep(PROBE_START_S)
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '/usage', '--enter'])
+            screen = wait_for_usage(lambda: orca_screen(h))
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '\x1b'])
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '/exit', '--enter'])
+            time.sleep(2)
+        finally:  # whatever failed, the probe tab never outlives the probe
+            closed = h is not None and run(['orca', 'terminal', 'close', '--terminal', h, '--tab']).returncode == 0
+            if not closed:
+                orca_close_by_title(repo, 'usage-probe', before)
         return parse_usage(screen)
     if b == 'tmux':
         target = [] if os.environ.get('TMUX') else ['-t', 'coord']
@@ -804,10 +852,9 @@ def probe_usage(cfg, dry=False):
         if dry:
             return {'session': None, 'week': None}
         try:
-            time.sleep(20)
+            time.sleep(PROBE_START_S)
             run(['tmux', 'send-keys', '-t', w, '/usage', 'Enter'], dry)
-            time.sleep(12)
-            screen = run(['tmux', 'capture-pane', '-p', '-t', w], dry).stdout
+            screen = wait_for_usage(lambda: run(['tmux', 'capture-pane', '-p', '-t', w], dry).stdout)
         finally:
             run(['tmux', 'kill-window', '-t', w], dry)
         return parse_usage(screen)

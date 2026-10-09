@@ -165,6 +165,34 @@ class CoordTest(unittest.TestCase):
         self.assertEqual(coord.parse_usage(screen), {'session': 7, 'week': 67})
         self.assertEqual(coord.parse_usage('nothing here'), {'session': None, 'week': None})
 
+    # the live /usage screen of `claude --model haiku` on Windows, verbatim
+    LIVE_USAGE = ('Current session\n'
+                  '███▌ 7% used\n'
+                  'Resets 7:29am (Indian/Maldives)\n'
+                  'Current week (all models)\n'
+                  '█████████ 67% used\n'
+                  'Resets Oct 13, 8:59am (Indian/Maldives)\n')
+
+    def test_parse_usage_live_screen(self):
+        self.assertEqual(coord.parse_usage(self.LIVE_USAGE), {'session': 7, 'week': 67})
+        self.assertEqual(coord.parse_usage(self.LIVE_USAGE.replace('\n', '\r\n')), {'session': 7, 'week': 67})
+        # the screen before /usage has drawn: nothing yet, never a stale number
+        self.assertEqual(coord.parse_usage('Current session\n'), {'session': None, 'week': None})
+
+    def test_wait_for_usage_polls_until_the_week_line(self):
+        screens = iter(['> /usage', 'Current session\n█ 7% used\n', self.LIVE_USAGE])
+        with mock.patch.object(coord.time, 'sleep', lambda s: None):
+            screen = coord.wait_for_usage(lambda: next(screens), timeout=60)
+        self.assertEqual(coord.parse_usage(screen)['week'], 67)
+
+    def test_subprocess_output_is_decoded_as_utf8(self):
+        # 0x9d is undefined in cp1252: the crash the live run hit
+        r = coord.run([sys.executable, '-c',
+                       'import sys; sys.stdout.buffer.write("█ 67% used ”".encode("utf-8"))'])
+        self.assertIn('67% used', r.stdout)
+        r = coord.run([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(b"\\x9d\\xff ok")'])
+        self.assertIn('ok', r.stdout)
+
     def test_probe_schedule(self):
         cfg = coord.Config(self.root)
         self.assertEqual(coord.probe_interval_min(cfg, None), 60)
@@ -205,8 +233,11 @@ class CoordTest(unittest.TestCase):
             if argv[:3] == ['orca', 'terminal', 'create']:
                 out = create_out
             elif argv[:3] == ['orca', 'terminal', 'list']:
-                out = json.dumps({'ok': True, 'result': {'terminals': [
-                    {'handle': 'term_orphan', 'title': 'usage-probe'}, {'handle': 'term_other', 'title': 'x'}]}})
+                # an older tab with the probe's title is never touched; the orphan exists once create has run
+                terms = [{'handle': 'term_old', 'title': 'usage-probe'}, {'handle': 'term_other', 'title': 'x'}]
+                if any(c[:3] == ['orca', 'terminal', 'create'] for c in calls):
+                    terms.append({'handle': 'term_orphan', 'title': 'usage-probe'})
+                out = json.dumps({'ok': True, 'result': {'terminals': terms}})
             elif argv[:3] == ['orca', 'terminal', 'read']:
                 out = 'Current session  12% used\nCurrent week (all models)  34% used\n'
             return coord.subprocess.CompletedProcess(argv, 0, out, '')
@@ -241,6 +272,51 @@ class CoordTest(unittest.TestCase):
                 coord.probe_usage(cfg)
         closes = [c for c in calls if c[:3] == ['orca', 'terminal', 'close']]
         self.assertEqual(closes, [['orca', 'terminal', 'close', '--terminal', 'term_orphan', '--tab']])
+
+    def test_orca_probe_reads_the_json_screen_and_always_closes_its_tab(self):
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        cfg['backend'] = 'orca'
+        screen = json.dumps({'ok': True, 'result': {'terminal': {
+            'handle': 'term_123', 'source': 'screen', 'tail': self.LIVE_USAGE.split('\n')}}})
+        base = self.fake_orca(self.ORCA_CREATE, [])
+
+        def run_ok(argv, dry=False, **kw):
+            calls.append(argv)
+            if argv[:3] == ['orca', 'terminal', 'read']:
+                return coord.subprocess.CompletedProcess(argv, 0, screen, '')
+            return base(argv)
+        calls = []
+        with mock.patch.object(coord, 'run', run_ok), mock.patch.object(coord.time, 'sleep', lambda s: None):
+            self.assertEqual(coord.probe_usage(cfg), {'session': 7, 'week': 67})
+        self.assertIn(['orca', 'terminal', 'close', '--terminal', 'term_123', '--tab'], calls)
+
+        # a failure in the middle (the cp1252 crash) still closes the tab
+        def run_crash(argv, dry=False, **kw):
+            calls.append(argv)
+            if argv[:3] == ['orca', 'terminal', 'read']:
+                raise UnicodeDecodeError('charmap', b'\x9d', 0, 1, 'undefined')
+            return base(argv)
+        calls = []
+        with mock.patch.object(coord, 'run', run_crash), mock.patch.object(coord.time, 'sleep', lambda s: None):
+            with self.assertRaises(UnicodeDecodeError):
+                coord.probe_usage(cfg)
+        self.assertIn(['orca', 'terminal', 'close', '--terminal', 'term_123', '--tab'], calls)
+
+        # a crash inside create itself: the tab is found by its title and closed
+        base = self.fake_orca(self.ORCA_CREATE, [])
+
+        def run_create_crash(argv, dry=False, **kw):
+            calls.append(argv)
+            if argv[:3] == ['orca', 'terminal', 'create']:
+                base(argv)  # orca made the tab; reading its output crashed
+                raise UnicodeDecodeError('charmap', b'\x9d', 0, 1, 'undefined')
+            return base(argv)
+        calls = []
+        with mock.patch.object(coord, 'run', run_create_crash):
+            with self.assertRaises(UnicodeDecodeError):
+                coord.probe_usage(cfg)
+        self.assertIn(['orca', 'terminal', 'close', '--terminal', 'term_orphan', '--tab'], calls)
 
     def test_graceful_pause_checkpoint_remind_interrupt_and_resume(self):
         self.run_cli('init')
