@@ -13,8 +13,8 @@
     python coord.py answer <qid> "<answer>"             answer a question; the asker gets it on the bus
     python coord.py preflight [--min-ram-gb N] [--min-battery P] [--max-user-idle-s S]
                                                         GO (exit 0) or WAIT (exit 1) for a heavy job, with reasons
-    python coord.py usage [--probe] [--json]           the latest usage reading (session and weekly %)
-    python coord.py usage-watch [--start] [--once]      probe usage on a schedule; alert the coordinator at the thresholds
+    python coord.py usage [--probe] [--json] [--debug]   the latest usage reading (session and weekly %)
+    python coord.py usage-watch [--start] [--once] [--probe] [--debug]  probe usage on a schedule; alert the coordinator at the thresholds
     python coord.py pause [--tick] [--wait] [--now]     graceful pause: every lane checkpoints its card and stops
     python coord.py paused [--role R]                   (a worker) report that this lane has checkpointed and stops
     python coord.py resume [--dry-run]                  respawn the paused lanes from their cards
@@ -762,9 +762,37 @@ def wait_for_usage(read_screen, timeout=None):
         time.sleep(PROBE_POLL_S)
 
 
+PROBE_DEBUG = {'dir': None, 'n': 0}  # `--debug`: every raw screen read is saved here
+
+
+def save_debug(raw, parsed_from=None):
+    d = PROBE_DEBUG['dir']
+    if not d:
+        return
+    d.mkdir(parents=True, exist_ok=True)
+    PROBE_DEBUG['n'] += 1
+    stem = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{PROBE_DEBUG['n']:02d}"
+    stem.with_suffix('.raw.txt').write_text(raw or '', encoding='utf-8')
+    if parsed_from is not None:
+        stem.with_suffix('.screen.txt').write_text(parsed_from, encoding='utf-8')
+    print(f'usage probe: debug read {PROBE_DEBUG["n"]} -> {stem}.*  parsed {parse_usage(parsed_from or raw)}')
+
+
+def tee_debug(text):
+    save_debug(text)
+    return text
+
+
 def orca_screen(h, dry=False):
     """The rendered screen of orca terminal `h` as text."""
     out = run(['orca', 'terminal', 'read', '--terminal', h, '--screen', '--json'], dry).stdout
+    text = screen_text(out)
+    save_debug(out, text)
+    return text
+
+
+def screen_text(out):
+    """The screen lines of `orca terminal read --screen --json` output (the raw text when it is not JSON)."""
     try:
         tail = ((json.loads(out or '{}').get('result') or {}).get('terminal') or {}).get('tail')
     except (ValueError, AttributeError):
@@ -794,6 +822,26 @@ def write_usage(cfg, reading, source):
     with open(cfg.path('reportsDir') / 'usage_history.log', 'a', encoding='utf-8') as f:
         f.write(f"{rec['at']} week={rec['week']}% session={rec['session']}% ({source})\n")
     return rec
+
+
+def record_probe(cfg, reading):
+    """Store a probe's reading. A probe that read no numbers is logged but never replaces the last good reading,
+    so it can neither hide a real one nor be reused as if it were fresh."""
+    source = 'probe:' + cfg['backend']
+    if reading.get('week') is None and reading.get('session') is None:
+        p = cfg.path('reportsDir') / 'usage_history.log'
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, 'a', encoding='utf-8') as f:
+            f.write(f"{now()} probe read no usage numbers ({source}); kept the last reading\n")
+        print(f'{now()} usage probe: the /usage screen had no numbers (run with --debug to save the screens)')
+        return None
+    return write_usage(cfg, reading, source)
+
+
+def usable_reading(cfg, last):
+    """The last reading when it has a weekly number and is younger than the current probe interval."""
+    wk = last.get('week')
+    return bool(last) and wk is not None and time.time() - last.get('time', 0) < probe_interval_min(cfg, wk) * 60
 
 
 def probe_interval_min(cfg, week):
@@ -854,7 +902,7 @@ def probe_usage(cfg, dry=False):
         try:
             time.sleep(PROBE_START_S)
             run(['tmux', 'send-keys', '-t', w, '/usage', 'Enter'], dry)
-            screen = wait_for_usage(lambda: run(['tmux', 'capture-pane', '-p', '-t', w], dry).stdout)
+            screen = wait_for_usage(lambda: tee_debug(run(['tmux', 'capture-pane', '-p', '-t', w], dry).stdout))
         finally:
             run(['tmux', 'kill-window', '-t', w], dry)
         return parse_usage(screen)
@@ -895,9 +943,15 @@ def usage_alerts(cfg, rec, state):
     return sent
 
 
+def debug_flag(cfg, args):
+    if '--debug' in args:
+        PROBE_DEBUG['dir'] = cfg.path('reportsDir') / 'usage-debug'
+
+
 def cmd_usage(cfg, args):
+    debug_flag(cfg, args)
     if '--probe' in args:
-        rec = write_usage(cfg, probe_usage(cfg, '--dry-run' in args), 'probe:' + cfg['backend'])
+        rec = record_probe(cfg, probe_usage(cfg, '--dry-run' in args)) or read_usage(cfg)
     else:
         rec = read_usage(cfg)
     if '--json' in args:
@@ -931,6 +985,7 @@ def cmd_record_usage(cfg, args):
 
 def cmd_usage_watch(cfg, args):
     """Probe on a schedule and alert at the thresholds. A reading the plugin recorded recently counts as a probe."""
+    debug_flag(cfg, args)
     if '--start' in args:
         cmd = f'python "{Path(__file__).resolve().as_posix()}" usage-watch'
         handle, how = open_terminal(cfg, 'usage-watch', cfg.repos()[0], cmd, '--dry-run' in args)
@@ -939,15 +994,15 @@ def cmd_usage_watch(cfg, args):
     state = {}
     while True:
         last = read_usage(cfg)
-        wk = last.get('week')
-        fresh = last and time.time() - last.get('time', 0) < probe_interval_min(cfg, wk) * 60
+        fresh = usable_reading(cfg, last) and '--probe' not in args
         try:
-            rec = last if fresh else write_usage(cfg, probe_usage(cfg), 'probe:' + cfg['backend'])
+            rec = last if fresh else (record_probe(cfg, probe_usage(cfg)) or last)
         except SystemExit as ex:
             print(f'{now()} {ex}')
             rec = last
         if rec:
-            print(f"{now()} week={rec.get('week')}% session={rec.get('session')}%", flush=True)
+            age = f" (reading of {rec.get('at')}, {rec.get('source')})" if rec is last else ''
+            print(f"{now()} week={rec.get('week')}% session={rec.get('session')}%{age}", flush=True)
             usage_alerts(cfg, rec, state)
         if '--once' in args:
             return 0

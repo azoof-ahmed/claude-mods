@@ -179,6 +179,45 @@ class CoordTest(unittest.TestCase):
         # the screen before /usage has drawn: nothing yet, never a stale number
         self.assertEqual(coord.parse_usage('Current session\n'), {'session': None, 'week': None})
 
+    def test_watch_never_reuses_a_reading_without_numbers(self):
+        # the 0.2.2 live failure: a failed 03:46 probe (None) was reused as fresh at 04:02, so nothing was probed
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        coord.write_usage(cfg, {'session': None, 'week': None}, 'probe:orca')
+        probes = []
+
+        def probe(cfg_, dry=False):
+            probes.append(1)
+            return coord.parse_usage(self.LIVE_USAGE)
+        with mock.patch.object(coord, 'probe_usage', probe):
+            _, out = self.run_cli('usage-watch', '--once')
+        self.assertEqual(len(probes), 1)
+        self.assertIn('week=67% session=7%', out)
+        # a probe that reads nothing keeps the good reading
+        with mock.patch.object(coord, 'probe_usage', lambda c, dry=False: {'session': None, 'week': None}):
+            _, out = self.run_cli('usage-watch', '--once', '--probe')
+        self.assertIn('no numbers', out)
+        self.assertEqual(coord.read_usage(coord.Config(self.root))['week'], 67)
+        # a fresh good reading is reused, and says so
+        with mock.patch.object(coord, 'probe_usage', probe):
+            _, out = self.run_cli('usage-watch', '--once')
+        self.assertEqual(len(probes), 1)
+        self.assertIn('(reading of', out)
+
+    def test_debug_saves_every_screen_read(self):
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        coord.debug_flag(cfg, ['--debug'])
+        try:
+            with mock.patch.object(coord, 'run', lambda argv, dry=False, **kw: coord.subprocess.CompletedProcess(
+                    argv, 0, json.dumps({'result': {'terminal': {'tail': self.LIVE_USAGE.split('\n')}}}), '')):
+                with redirect_stdout(io.StringIO()):
+                    self.assertIn('67% used', coord.orca_screen('term_1'))
+        finally:
+            coord.PROBE_DEBUG['dir'] = None
+        saved = sorted(p.name for p in (cfg.path('reportsDir') / 'usage-debug').iterdir())
+        self.assertEqual([n.split('.', 1)[1] for n in saved], ['raw.txt', 'screen.txt'])
+
     def test_wait_for_usage_polls_until_the_week_line(self):
         screens = iter(['> /usage', 'Current session\n█ 7% used\n', self.LIVE_USAGE])
         with mock.patch.object(coord.time, 'sleep', lambda s: None):

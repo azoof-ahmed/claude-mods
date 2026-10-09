@@ -64,8 +64,8 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `questions [--all]` | Lists open questions (or all of them). |
 | `answer <qid> "<a>"` | Records the answer and sends it to the asker on the bus. |
 | `preflight [--min-ram-gb N] [--min-battery P] [--max-user-idle-s S]` | GO (exit 0) or WAIT (exit 1) for a heavy job, with the reasons. Works on Windows, Linux and macOS. |
-| `usage [--probe] [--json]` | The latest usage reading (session and weekly %). `--probe` reads `/usage` now (orca, tmux). |
-| `usage-watch [--start] [--once]` | Probes usage on the `probeIntervals` schedule and alerts the coordinator at the thresholds. `--start` runs it in its own terminal. |
+| `usage [--probe] [--json] [--debug]` | The latest usage reading (session and weekly %). `--probe` reads `/usage` now (orca, tmux). `--debug` saves every raw screen read to `<reportsDir>/usage-debug/`. |
+| `usage-watch [--start] [--once] [--probe] [--debug]` | Probes usage on the `probeIntervals` schedule and alerts the coordinator at the thresholds. A reading younger than the interval is reused (and says so); one without numbers never is, and a probe that reads no numbers never replaces a good reading. `--probe` forces a probe now. `--start` runs it in its own terminal. |
 | `pause [--tick] [--wait]` | The graceful pause: asks every live lane to checkpoint and stop. `--tick` advances it; `--wait` runs it to the end. The plugin ticks it every minute. |
 | `paused` | A worker reports that it has checkpointed (uses `AGENT_BUS_ROLE`, or `--role`). |
 | `resume [--dry-run]` | Respawns every paused lane from its card on the resume brief. |
