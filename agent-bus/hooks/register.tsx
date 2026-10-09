@@ -78,14 +78,57 @@ async function hook($: $T, python: string, event: string): Promise<HookOut> {
   return JSON.parse(ran.stdout) as HookOut
 }
 
+/** What `/bus` says when the configured bus directory does not exist. */
+export function noBusText(dir: string | undefined): string {
+  return (
+    `agent-bus: no bus in this project yet (${dir ?? '.claude/bus'}). \`/bus init\` creates one there. ` +
+    'If this project\'s bus lives elsewhere, set "busDir" in the "agent-bus" section of .claude/claude-mods.json ' +
+    '(for example {"agent-bus": {"busDir": "tmp/bus"}}).'
+  )
+}
+
+/** The `/bus` subcommands: the pane's own, then the bus.py verbs. Nothing else ever reaches the CLI. */
+export const BUS_VERBS = [
+  'pane', 'full', 'tui', 'chat', 'init', 'send', 'digest', 'read', 'inbox', 'ack', 'watch', 'react', 'thread',
+  'sub', 'unsub', 'pin', 'unpin', 'edit', 'delete', 'status', 'who', 'register', 'unregister', 'deliver',
+  'snapshot', 'whoami', 'watch-live',
+] as const
+
+export const BUS_HELP = [
+  'Usage: /bus [subcommand]  (no subcommand opens the chat pane)',
+  '  @role <text>             send <text> to role as user',
+  '  full | tui               the full-screen client in a new terminal',
+  '  chat [--stop|--status]   the localhost web chat',
+  '  init [--roles a,b]       create this project\'s bus',
+  '  send <to> "<text>"       send a message',
+  '  digest | who | status [id] | read <id> | thread <id>',
+  '  react <id> <emoji> | sub | unsub | pin | unpin | edit | delete <id>',
+  '  register <role> ... | whoami | deliver',
+].join('\n')
+
 /**
- * `/bus` arguments as bus.py verbs. Nothing opens the chat pane (null); `full` and `tui` start the
- * standalone full-screen client in a new terminal; `chat` starts the web chat in the background.
+ * `/bus` arguments as bus.py verbs. Nothing (or `pane`) opens the chat pane (null); `full` and `tui` start
+ * the standalone full-screen client in a new terminal; `chat` starts the web chat in the background;
+ * `@role text` sends text to that role as `user`. Anything else is not a subcommand: the help text
+ * (a string) is returned, and nothing is run.
  */
-export function busArgs(typed: string): string[] | null {
-  const args = typed.trim() === '' ? [] : typed.trim().split(/\s+/)
-  if (args.length === 0) {
+export function busArgs(typed: string): string[] | string | null {
+  const trimmed = typed.trim()
+  const args = trimmed === '' ? [] : trimmed.split(/\s+/)
+  if (args.length === 0 || (args[0] === 'pane' && args.length === 1)) {
     return null
+  }
+  const lead = /^((?:@[A-Za-z0-9][\w.-]*[\s,]*)+)([\s\S]*)$/.exec(trimmed)
+  if (lead) {
+    const to = [...(lead[1] ?? '').matchAll(/@([A-Za-z0-9][\w.-]*)/g)].map(x => (x[1] ?? '').replace(/[.-]+$/, ''))
+    const text = (lead[2] ?? '').trim()
+    return text === '' ? `${BUS_HELP}\n\n/bus @role needs a message after the role.` : ['send', '--from', ME, '--', to.join(','), text]
+  }
+  if (['help', '-h', '--help'].includes(args[0] ?? '')) {
+    return BUS_HELP
+  }
+  if (!(BUS_VERBS as readonly string[]).includes(args[0] ?? '') || args[0] === 'pane') {
+    return `/bus: "${args[0]}" is not a subcommand.\n${BUS_HELP}`
   }
   const flags = new Set(args.slice(1))
   if (args[0] === 'chat' && !flags.has('--stop') && !flags.has('--status')) {
@@ -392,7 +435,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'bus',
       description: 'agent-bus: open the chat pane; `full` opens the full-screen client, `chat` the web chat; or any bus verb.',
-      argumentHint: '[full|chat|digest|who|init|status <id>|...]',
+      argumentHint: '[@role text|full|chat|digest|who|init|send|status <id>|help]',
     })
     if (cfg.band) {
       // the band's slow look; the pane polls faster while it is open
@@ -409,11 +452,14 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'bus' }, async ($, e) => {
     const args = busArgs(e.args)
+    if (typeof args === 'string') {
+      return { text: args }
+    }
     if (args === null) {
       const placed = await openPane($)
       const s = await read($, snap)
       if (s && !s.bus) {
-        return { text: `agent-bus: no bus in this project yet (${s.dir ?? '.claude/bus'}); \`/bus init\` creates one.` }
+        return { text: noBusText(s.dir) }
       }
       return {
         text: placed
@@ -495,6 +541,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Text>No bus in this project.</Text>
           <Text dimColor>`/bus init` creates {s.dir ?? '.claude/bus'}</Text>
+          <Text dimColor>A bus elsewhere: set "busDir" under "agent-bus" in .claude/claude-mods.json</Text>
         </Box>
       )
     }

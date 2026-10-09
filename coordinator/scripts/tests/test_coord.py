@@ -194,6 +194,54 @@ class CoordTest(unittest.TestCase):
         _, out = self.run_cli('usage', '--probe', '--dry-run', '--backend', 'tmux')
         self.assertIn('claude --model haiku', out)
 
+    # the real `orca terminal create --json` output: the handle is at result.terminal.handle
+    ORCA_CREATE = json.dumps({'id': 'c0ffee', 'ok': True, 'result': {'terminal': {
+        'handle': 'term_123', 'title': 'usage-probe', 'worktreeId': 'w::E:/repo', 'tabId': 't1'}}})
+
+    def fake_orca(self, create_out, calls):
+        def run(argv, dry=False, **kw):
+            calls.append(argv)
+            out = ''
+            if argv[:3] == ['orca', 'terminal', 'create']:
+                out = create_out
+            elif argv[:3] == ['orca', 'terminal', 'list']:
+                out = json.dumps({'ok': True, 'result': {'terminals': [
+                    {'handle': 'term_orphan', 'title': 'usage-probe'}, {'handle': 'term_other', 'title': 'x'}]}})
+            elif argv[:3] == ['orca', 'terminal', 'read']:
+                out = 'Current session  12% used\nCurrent week (all models)  34% used\n'
+            return coord.subprocess.CompletedProcess(argv, 0, out, '')
+        return run
+
+    def test_orca_handle_accepts_all_create_shapes(self):
+        self.assertEqual(coord.orca_handle(self.ORCA_CREATE), 'term_123')
+        self.assertEqual(coord.orca_handle('{"ok":true,"result":{"handle":"term_a"}}'), 'term_a')
+        self.assertEqual(coord.orca_handle('{"handle":"term_b"}'), 'term_b')
+        self.assertIsNone(coord.orca_handle('not json'))
+        self.assertIsNone(coord.orca_handle('{"ok":true,"result":{"terminal":{}}}'))
+
+    def test_orca_spawn_and_probe_read_the_real_create_output(self):
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        cfg['backend'] = 'orca'
+        calls = []
+        with mock.patch.object(coord, 'run', self.fake_orca(self.ORCA_CREATE, calls)), \
+                mock.patch.object(coord.time, 'sleep', lambda s: None):
+            self.assertEqual(coord.open_terminal(cfg, 'w1', str(self.root), 'claude'), ('term_123', 'orca'))
+            coord.probe_usage(cfg)
+        closes = [c for c in calls if c[:3] == ['orca', 'terminal', 'close']]
+        self.assertEqual(closes, [['orca', 'terminal', 'close', '--terminal', 'term_123', '--tab']])
+
+    def test_orca_unreadable_create_closes_the_tab_by_title(self):
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        cfg['backend'] = 'orca'
+        calls = []
+        with mock.patch.object(coord, 'run', self.fake_orca('{"ok":true,"result":{}}', calls)):
+            with self.assertRaises(SystemExit):
+                coord.probe_usage(cfg)
+        closes = [c for c in calls if c[:3] == ['orca', 'terminal', 'close']]
+        self.assertEqual(closes, [['orca', 'terminal', 'close', '--terminal', 'term_orphan', '--tab']])
+
     def test_graceful_pause_checkpoint_remind_interrupt_and_resume(self):
         self.run_cli('init')
         for r in ('fast', 'slow', 'silent'):

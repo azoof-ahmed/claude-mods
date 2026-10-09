@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -51,6 +51,33 @@ class BusCliTest(unittest.TestCase):
             self.assertEqual(cfg['chatPort'], 9000)  # the project file beats the env
             cfg = bus.load_config({'dir': 'flag/bus'}, root=self.root)
             self.assertEqual(Path(cfg['dir']), self.root / 'flag' / 'bus')
+
+    def test_project_file_reads_busDir_and_dir_and_warns_on_unknown_keys(self):
+        (self.root / '.claude').mkdir()
+        f = self.root / '.claude' / 'claude-mods.json'
+        err = io.StringIO()
+        f.write_text(json.dumps({'agent-bus': {'busDir': 'tmp/bus', 'colour': 'red', 'theme': 'claude'}}))
+        with mock.patch.dict(os.environ, {**CLEAN, 'AGENT_BUS_DIR': '.claude/bus'}), redirect_stderr(err):
+            cfg = bus.load_config({}, root=self.root)
+        self.assertEqual(Path(cfg['dir']), self.root / 'tmp' / 'bus')  # busDir beats the env
+        self.assertIn('unknown key "colour"', err.getvalue())
+        self.assertIn('"theme" is a plugin option', err.getvalue())
+        self.assertNotIn('key "busDir"', err.getvalue())
+        f.write_text(json.dumps({'agent-bus': {'dir': 'old/bus'}}))  # the old key still works
+        with mock.patch.dict(os.environ, CLEAN):
+            self.assertEqual(Path(bus.load_config({}, root=self.root)['dir']), self.root / 'old' / 'bus')
+
+    def test_verbs_never_create_the_bus_implicitly(self):
+        for verb in (['whoami', '--as', 'x'], ['digest'], ['who'], ['watch-live', '--as', 'x']):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                code, _ = run(verb, self.root)
+            self.assertEqual(code, 2, verb)
+            self.assertIn('busDir', err.getvalue())
+        self.assertFalse(self.dir.exists())
+        code, _ = run(['init'], self.root)
+        self.assertEqual(code, 0)
+        self.assertTrue(self.dir.is_dir())
 
     def test_hook_without_a_bus_stays_quiet(self):
         code, out = run(['hook', '--event', 'PostToolUse'], self.root)
@@ -178,8 +205,12 @@ class BusCliTest(unittest.TestCase):
         self.assertIn('line two', got['body'])
 
     def test_deliver_refuses_without_the_orca_backend(self):
-        code, _ = run(['deliver', '--once'], self.root)
+        run(['init'], self.root)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code, _ = run(['deliver', '--once'], self.root)
         self.assertEqual(code, 2)
+        self.assertIn('backend is "none"', err.getvalue())
 
 
 if __name__ == '__main__':

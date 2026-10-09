@@ -37,7 +37,7 @@ def main(root, role=None, theme=None) -> int:
         return 2
     root = Path(root or find_bus_dir())
     if not root.is_dir():
-        print(f'bus-tui: no bus at {root} (create it with the bus `init` verb, or set AGENT_BUS_DIR)', file=sys.stderr)
+        print(f'bus-tui: no bus at {root} (create it with the bus `init` verb; a bus elsewhere: set "busDir" under "agent-bus" in .claude/claude-mods.json)', file=sys.stderr)
         return 2
     role = role or os.environ.get('AGENT_BUS_ROLE') or 'user'
     BusTui(str(root), role, theme).run()

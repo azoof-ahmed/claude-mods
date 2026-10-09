@@ -1,6 +1,6 @@
 {
   "name": "agent-bus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca terminals, a /bus chat pane, an unread band and a localhost web chat show it all. Built on orca-bus.",
   "author": {
     "name": "Azoof Ahmed"

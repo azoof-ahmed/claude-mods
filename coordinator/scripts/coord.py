@@ -91,8 +91,16 @@ class Config(dict):
                 self[k] = v
         if self.file.exists():  # the project's own file beats the environment (the plugin's options arrive as env)
             try:
-                self.update(json.loads(self.file.read_text(encoding='utf-8')).get('coordinator', {}))
-            except (ValueError, OSError) as ex:
+                section = json.loads(self.file.read_text(encoding='utf-8')).get('coordinator') or {}
+                for k in section:
+                    if k == 'python':
+                        print(f'coordinator: {self.file}: "python" is a plugin option (set it in /config); '
+                              f'the project file does not set it', file=sys.stderr)
+                    elif k not in DEFAULTS:
+                        print(f'coordinator: {self.file}: unknown key "{k}" ignored; known keys: '
+                              f'{", ".join(DEFAULTS)}', file=sys.stderr)
+                self.update({k: v for k, v in section.items() if k in DEFAULTS})
+            except (ValueError, OSError, AttributeError) as ex:
                 print(f'coordinator: ignoring {self.file}: {ex}', file=sys.stderr)
         for k, v in (flags or {}).items():
             if v not in (None, ''):
@@ -248,18 +256,48 @@ def run(argv, dry, **kw):
     return subprocess.run(argv, capture_output=True, text=True, **kw)
 
 
+def orca_handle(stdout):
+    """The terminal handle in `orca terminal create --json` output, or None.
+
+    orca prints {"ok":true,"result":{"terminal":{"handle":"term_..."}}}; result.handle and handle are accepted too.
+    """
+    try:
+        res = json.loads(stdout or '{}')
+    except ValueError:
+        return None
+    if not isinstance(res, dict):
+        return None
+    result = res.get('result') if isinstance(res.get('result'), dict) else {}
+    term = result.get('terminal') if isinstance(result.get('terminal'), dict) else {}
+    return term.get('handle') or result.get('handle') or res.get('handle') or None
+
+
+def orca_close_by_title(repo, title, dry=False):
+    """Close every orca terminal titled `title` in `repo`; used when a create worked but its handle was unreadable."""
+    r = run(['orca', 'terminal', 'list', '--worktree', f'path:{repo}', '--json'], dry)
+    try:
+        res = json.loads(r.stdout or '{}')
+        terms = (res.get('result') or {}).get('terminals') or res.get('terminals') or []
+    except (ValueError, AttributeError):
+        terms = []
+    closed = 0
+    for t in terms:
+        if isinstance(t, dict) and t.get('title') == title and t.get('handle'):
+            if run(['orca', 'terminal', 'close', '--terminal', t['handle'], '--tab'], dry).returncode == 0:
+                closed += 1
+    return closed
+
+
 def open_terminal(cfg, role, repo, cmd, dry=False):
     """Start `cmd` for `role` in a new terminal; returns (handle, how). The worker's env carries AGENT_BUS_ROLE."""
     b = cfg['backend']
     if b == 'orca':
         r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', role,
                  '--command', with_env(cfg, role, cmd), '--json'], dry)
-        try:
-            res = json.loads(r.stdout or '{}')
-            handle = (res.get('result') or {}).get('handle') or res.get('handle')
-        except ValueError:
-            handle = None
+        handle = orca_handle(r.stdout)
         if not handle and not dry:
+            if r.returncode == 0:
+                orca_close_by_title(repo, role)  # the tab may exist: never leave an orphan
             raise SystemExit(f'coordinator: orca terminal create failed: {r.stderr.strip() or r.stdout.strip()}')
         return handle, 'orca'
     if b == 'tmux':
@@ -737,14 +775,12 @@ def probe_usage(cfg, dry=False):
     repo = cfg.repos()[0]
     if b == 'orca':
         r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', 'usage-probe', '--json'], dry)
-        try:
-            res = json.loads(r.stdout or '{}')
-            h = (res.get('result') or {}).get('handle') or res.get('handle')
-        except ValueError:
-            h = None
+        h = orca_handle(r.stdout)
         if dry:
             return {'session': None, 'week': None}
         if not h:
+            if r.returncode == 0:
+                orca_close_by_title(repo, 'usage-probe')  # the tab may exist: never leave an orphan
             raise SystemExit('coordinator: usage probe: orca could not open a terminal')
         try:
             run(['orca', 'terminal', 'send', '--terminal', h, '--text', cfg['probeCommand'], '--enter'], dry)

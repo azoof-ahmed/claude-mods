@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { busArgs } from '../hooks/register'
+import { BUS_HELP, busArgs, noBusText } from '../hooks/register'
 
 const CLI = 'python "/plugins/agent-bus/scripts/bus.py"'
 
@@ -101,4 +101,26 @@ test('/bus arguments map to bus.py verbs; none opens the pane', async () => {
   expect(busArgs('chat --stop')).toEqual(['chat', '--stop'])
   expect(busArgs('tui')).toEqual(['tui', '--open'])
   expect(busArgs('status m1')).toEqual(['status', 'm1'])
+})
+
+test('/bus free text never reaches the CLI: @role sends as user, anything else shows help', async () => {
+  expect(busArgs('pane')).toBeNull()
+  expect(busArgs('@coordinator rebase before the next slice')).toEqual(
+    ['send', '--from', 'user', '--', 'coordinator', 'rebase before the next slice'])
+  expect(busArgs('@w1, @w2 stop now')).toEqual(['send', '--from', 'user', '--', 'w1,w2', 'stop now'])
+  const says = busArgs("says there's no bus in this project. what the heck?")
+  expect(typeof says).toBe('string')
+  expect(says as string).toContain('"says" is not a subcommand')
+  expect(says as string).toContain(BUS_HELP)
+  expect(busArgs('help')).toBe(BUS_HELP)
+  expect(typeof busArgs('@coordinator')).toBe('string')
+  expect(busArgs('send w1 hi')).toEqual(['send', 'w1', 'hi'])
+  expect(busArgs('init --roles a,b')).toEqual(['init', '--roles', 'a,b'])
+})
+
+test('the no-bus message points at busDir in .claude/claude-mods.json', async () => {
+  const t = noBusText('/p/.claude/bus')
+  expect(t).toContain('/bus init')
+  expect(t).toContain('"busDir"')
+  expect(t).toContain('.claude/claude-mods.json')
 })

@@ -29,6 +29,7 @@ Then start each agent with `AGENT_BUS_ROLE=<role>` set. The [coordinator](../coo
 
 ```
 /bus                           # open the chat pane (as the role `user`)
+/bus @worker-a rebase first    # send a message to a role as user
 /bus digest                    # your unread mail, one line each
 /bus send worker-a "rebase on main before the next slice"
 /bus chat                      # start the web chat in the background and print its URL
@@ -53,7 +54,7 @@ The agent itself uses the CLI that its session context names: `python "<plugin>/
 
 ## The CLI
 
-`/bus <verb>` and `bus <verb>` take the same verbs (`/bus` alone opens the chat pane).
+`/bus <verb>` and `bus <verb>` take the same verbs (`/bus` alone opens the chat pane, `/bus @role text` sends to that role, and any other word shows the help; free text never reaches the CLI).
 
 | Verb | What it does |
 | --- | --- |
@@ -281,7 +282,7 @@ with `--theme`, `:theme <name>`, or `Space T`.
 
 ## Options
 
-Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`. They reach the CLI as environment variables. A project's `.claude/claude-mods.json` section `"agent-bus"` overrides them.
+Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`. They reach the CLI as environment variables. A project's `.claude/claude-mods.json` section `"agent-bus"` overrides the bus options (`busDir`, `roles`, `orcaBusPath`, `backend`, `nudgeAfter`, `chatPort`, `chatBind`, `tasksDb`; `dir` is still read as an old name for `busDir`); the session options (`role`, `python`, `monitor`, `taskPrefix`, `band`, `theme`) come from `/config` only. Other keys are reported and ignored. Only `init` creates the bus directory.
 
 | Option | Default | What it does |
 | --- | --- | --- |

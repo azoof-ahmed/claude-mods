@@ -61,6 +61,30 @@ def project_root(start=None):
     return here
 
 
+# The project file's "agent-bus" keys are the documented option names (README, plugin.json). `busDir` is the bus
+# directory; `dir` is still read for older files. The session-side options are read by the plugin, not by this CLI.
+PROJECT_KEYS = {'busDir': 'dir', 'dir': 'dir', 'roles': 'roles', 'orcaBusPath': 'orcaBusPath', 'backend': 'backend',
+                'nudgeAfter': 'nudgeAfter', 'chatPort': 'chatPort', 'chatBind': 'chatBind', 'tasksDb': 'tasksDb'}
+PLUGIN_ONLY_KEYS = ('role', 'python', 'monitor', 'taskPrefix', 'band', 'theme')
+
+
+def project_keys(section, path):
+    """The project file's "agent-bus" section as config keys; a warning names every key that has no effect here."""
+    out = {}
+    for k, v in section.items():
+        if k in PROJECT_KEYS:
+            out[PROJECT_KEYS[k]] = v
+        elif k in PLUGIN_ONLY_KEYS:
+            print(f'agent-bus: {path}: "{k}" is a plugin option (set it in /config); the project file does not '
+                  f'set it', file=sys.stderr)
+        else:
+            print(f'agent-bus: {path}: unknown key "{k}" ignored; known keys: '
+                  f'{", ".join(k for k in PROJECT_KEYS if k != "dir")}', file=sys.stderr)
+    if 'busDir' in section:
+        out['dir'] = section['busDir']  # the documented name wins over the old one
+    return out
+
+
 def load_config(flags=None, root=None):
     root = root or project_root()
     cfg = dict(DEFAULTS)
@@ -70,8 +94,8 @@ def load_config(flags=None, root=None):
     p = root / '.claude' / 'claude-mods.json'
     if p.exists():  # the project's own file beats the environment (the plugin's options arrive as env)
         try:
-            cfg.update(json.loads(p.read_text(encoding='utf-8')).get('agent-bus', {}))
-        except (ValueError, OSError) as ex:
+            cfg.update(project_keys(json.loads(p.read_text(encoding='utf-8')).get('agent-bus') or {}, p))
+        except (ValueError, OSError, AttributeError) as ex:
             print(f'agent-bus: ignoring {p}: {ex}', file=sys.stderr)
     for k, v in (flags or {}).items():
         if v not in (None, ''):
@@ -459,6 +483,10 @@ def main(argv=None):
         print(f'agent-bus: {root} ready; roles: {", ".join(sorted(bus.registry()))}')
         return 0
 
+    if not Path(root).is_dir():  # only init creates a bus; any other verb would make an empty one here
+        print(f'agent-bus: no bus at {root}. `/bus init` (bus.py init) creates one; if this project\'s bus lives '
+              f'elsewhere, set "busDir" in the "agent-bus" section of .claude/claude-mods.json.', file=sys.stderr)
+        return 2
     bus = Bus(root)
     if verb == 'whoami':
         role = resolve_role(bus, take(argv, '--as'))
