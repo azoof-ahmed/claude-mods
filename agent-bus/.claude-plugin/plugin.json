@@ -1,0 +1,117 @@
+{
+  "name": "agent-bus",
+  "version": "0.1.0",
+  "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca terminals, a /bus chat pane, an unread band and a localhost web chat show it all. Built on orca-bus.",
+  "author": {
+    "name": "Azoof Ahmed"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "busDir": {
+      "type": "string",
+      "title": "Bus directory",
+      "description": "Where the bus keeps its inboxes, registry and log. Relative paths are under the project root (the nearest folder with .git or .claude).",
+      "default": ".claude/bus"
+    },
+    "role": {
+      "type": "string",
+      "title": "Default role",
+      "description": "This session's role when neither AGENT_BUS_ROLE nor ORCA_BUS_NAME is set and the terminal is not registered. Usually left empty: the coordinator sets AGENT_BUS_ROLE when it starts a worker.",
+      "default": ""
+    },
+    "roles": {
+      "type": "string",
+      "title": "Roles created by init",
+      "description": "Comma-separated roles `bus.py init` registers in file mode.",
+      "default": "coordinator"
+    },
+    "orcaBusPath": {
+      "type": "string",
+      "title": "orca-bus checkout",
+      "description": "A local checkout of orca-bus to import from. Empty: use the installed package (pip install \"git+https://github.com/polygon-mv/orca-bus\").",
+      "default": ""
+    },
+    "python": {
+      "type": "string",
+      "title": "Python",
+      "description": "The Python interpreter that runs the bus (3.9 or newer).",
+      "default": "python"
+    },
+    "backend": {
+      "type": "string",
+      "title": "Terminal backend for urgent mail",
+      "description": "orca: the deliver daemon may type urgent mail and idle nudges into Orca terminals. none: nothing is ever typed; mail arrives through the hook and the Monitor only.",
+      "default": "none",
+      "options": [
+        "none",
+        "orca"
+      ]
+    },
+    "nudgeAfter": {
+      "type": "number",
+      "title": "Nudge after (seconds)",
+      "description": "orca backend: seconds of unread mail before the daemon types one nudge into an idle tab. Never sent while that role has a live watch.",
+      "default": 300
+    },
+    "monitor": {
+      "type": "string",
+      "title": "Ask the agent to arm a Monitor",
+      "description": "on: at session start, and once before going idle, a session with a role and no live watch is told to arm a Monitor on `bus.py watch`. off: never.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "chatPort": {
+      "type": "number",
+      "title": "Web chat port",
+      "description": "Port of the localhost web chat (`bus.py chat`).",
+      "default": 8790
+    },
+    "chatBind": {
+      "type": "string",
+      "title": "Web chat bind address",
+      "description": "The chat binds to loopback only: 127.0.0.1, localhost or ::1.",
+      "default": "127.0.0.1",
+      "options": [
+        "127.0.0.1",
+        "localhost",
+        "::1"
+      ]
+    },
+    "tasksDb": {
+      "type": "string",
+      "title": "Task tracker database",
+      "description": "Optional: a task-tracker SQLite db whose in-progress tasks the chat shows per role.",
+      "default": ""
+    },
+    "taskPrefix": {
+      "type": "string",
+      "title": "Task id prefix",
+      "description": "The task tracker's id prefix (PREFIX-123); such ids become task chips in the chat and the TUI.",
+      "default": "TASK"
+    },
+    "band": {
+      "type": "string",
+      "title": "Unread band above the prompt",
+      "description": "on: while the /bus pane is closed and the user has unread mail or @mentions, a one-line band above the prompt shows the counts with an Open button. off: never.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "theme": {
+      "type": "string",
+      "title": "Chat pane theme",
+      "description": "Colors of the /bus pane and band: tokyonight (blue accent) or claude (orange accent).",
+      "default": "tokyonight",
+      "options": [
+        "tokyonight",
+        "claude"
+      ]
+    }
+  }
+}

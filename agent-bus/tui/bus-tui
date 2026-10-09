@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""bus-tui [--dir BUSDIR] [--as ROLE] [--theme tokyonight|catppuccin|claude]: the agent-bus terminal client."""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(1, str(HERE.parent / 'vendor'))
+
+
+def run():
+    p = argparse.ArgumentParser(prog='bus-tui', description=__doc__)
+    p.add_argument('--dir', help='bus directory (default: $AGENT_BUS_DIR, else .claude/bus in the project root)')
+    p.add_argument('--as', dest='role', help='your role (default: $AGENT_BUS_ROLE, else user)')
+    p.add_argument('--theme', help='tokyonight (default), catppuccin or claude')
+    a = p.parse_args()
+    from bus_tui.app import find_bus_dir, main
+    return main(str(Path(a.dir) if a.dir else find_bus_dir()), a.role or os.environ.get('AGENT_BUS_ROLE'), a.theme)
+
+
+if __name__ == '__main__':
+    sys.exit(run())

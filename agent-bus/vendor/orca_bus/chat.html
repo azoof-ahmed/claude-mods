@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bus-chat</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text x='4' y='26' font-size='26' fill='%23D97757'>✻</text></svg>">
+<style>
+:root {
+  --bg:#1a1918; --panel:#1f1e1c; --raised:#262523; --hover:#2c2a27; --border:#383532; --border-soft:#2b2926;
+  --text:#ece9e4; --muted:#a39e96; --faint:#6e6962; --accent:#d97757; --accent-2:#e8916f;
+  --accent-soft:rgba(217,119,87,.13); --accent-line:rgba(217,119,87,.45);
+  --danger:#e8675d; --danger-soft:rgba(232,103,93,.14); --ok:#7cc48a; --warn:#e2b552; --code:#2a2826;
+  --name-s:58%; --name-l:72%; --av-s:32%; --av-l:30%; --av-t:#f4efe8; --shadow:0 8px 28px rgba(0,0,0,.45);
+  --mono:"JetBrains Mono","Cascadia Code","SF Mono",ui-monospace,Consolas,monospace;
+  --sans:ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif;
+  color-scheme:dark;
+}
+:root[data-theme="light"] {
+  --bg:#faf9f5; --panel:#f3f1ea; --raised:#ffffff; --hover:#ebe8df; --border:#dcd8cd; --border-soft:#e8e5dc;
+  --text:#1f1e1d; --muted:#67635b; --faint:#9b968c; --accent:#c4623f; --accent-2:#b4552f;
+  --accent-soft:rgba(196,98,63,.10); --accent-line:rgba(196,98,63,.45);
+  --danger:#c8423a; --danger-soft:rgba(200,66,58,.10); --ok:#3d8a4c; --warn:#a87612; --code:#efece4;
+  --name-s:50%; --name-l:36%; --av-s:45%; --av-l:86%; --av-t:#2a2622; --shadow:0 8px 28px rgba(60,50,40,.16);
+  color-scheme:light;
+}
+* { box-sizing:border-box; }
+html,body { height:100%; margin:0; }
+body { background:var(--bg); color:var(--text); font:14px/1.5 var(--sans); overflow:hidden; }
+button,input,select,textarea { font:inherit; color:inherit; }
+button { cursor:pointer; }
+::selection { background:var(--accent-soft); }
+.mono { font-family:var(--mono); }
+.app { display:grid; grid-template-columns:232px minmax(0,1fr) 284px; grid-template-rows:44px minmax(0,1fr); height:100%; }
+header { grid-column:1/-1; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--border);
+  background:var(--panel); font-family:var(--mono); font-size:12.5px; min-width:0; }
+.brand { color:var(--accent); font-weight:600; letter-spacing:.2px; white-space:nowrap; display:flex; gap:7px; align-items:center; }
+.brand .star { font-size:17px; line-height:1; display:inline-block; }
+.brand .star.live { animation:spin 6s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.crumb { color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.search { flex:1; max-width:420px; margin-left:auto; position:relative; }
+.search input { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:5px 10px 5px 26px;
+  font-family:var(--mono); font-size:12px; outline:none; }
+.search input:focus { border-color:var(--accent-line); }
+.search::before { content:"⌕"; position:absolute; left:9px; top:4px; color:var(--faint); }
+.hbtn { background:transparent; border:1px solid var(--border); border-radius:6px; padding:4px 9px; font-family:var(--mono);
+  font-size:12px; color:var(--muted); white-space:nowrap; }
+.hbtn:hover { color:var(--text); border-color:var(--faint); }
+.hbtn.on { color:var(--accent); border-color:var(--accent-line); background:var(--accent-soft); }
+.conn { width:8px; height:8px; border-radius:50%; background:var(--faint); flex:none; }
+.conn.ok { background:var(--ok); } .conn.bad { background:var(--danger); }
+aside { background:var(--panel); overflow-y:auto; min-height:0; font-family:var(--mono); font-size:12.5px; }
+aside.left { border-right:1px solid var(--border); padding:10px 8px; }
+aside.right { border-left:1px solid var(--border); padding:10px 8px; }
+.sec { margin:4px 0 14px; }
+.sec h3 { font-size:11px; font-weight:500; letter-spacing:.6px; text-transform:uppercase; color:var(--faint); margin:0 6px 6px;
+  display:flex; justify-content:space-between; }
+.item { display:flex; align-items:center; gap:7px; padding:4px 8px; border-radius:6px; color:var(--muted); cursor:pointer;
+  white-space:nowrap; overflow:hidden; }
+.item:hover { background:var(--hover); color:var(--text); }
+.item.sel { background:var(--accent-soft); color:var(--accent); }
+.item .n { margin-left:auto; font-size:11px; color:var(--faint); }
+.item .badge { margin-left:auto; }
+.badge { background:var(--accent); color:#fff; border-radius:9px; font-size:10.5px; padding:0 6px; line-height:17px; font-weight:600; }
+.card { border:1px solid var(--border-soft); background:var(--raised); border-radius:8px; padding:9px 10px; margin:0 4px; color:var(--muted); font-size:12px; }
+.card b { color:var(--text); font-weight:600; }
+.card .row { display:flex; justify-content:space-between; gap:8px; }
+.card .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:2px 6px; margin-top:4px; }
+.card .stats span { display:flex; flex-direction:column; font-size:10.5px; }
+.card .stats b { font-size:14px; }
+.pinitem { padding:5px 8px; border-radius:6px; cursor:pointer; color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pinitem:hover { background:var(--hover); color:var(--text); }
+/* lanes */
+.lane { display:grid; grid-template-columns:30px minmax(0,1fr) auto; gap:2px 8px; padding:6px 8px; border-radius:7px; cursor:pointer; align-items:center; }
+.lane:hover { background:var(--hover); }
+.lane.sel { background:var(--accent-soft); }
+.lane .av { grid-row:1/span 3; position:relative; }
+.lane .nm { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lane .ttl, .lane .tk { grid-column:2/-1; font-size:11px; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lane .tk .task { font-size:10.5px; }
+.lane.dead { opacity:.55; }
+.dot { position:absolute; right:-2px; bottom:-2px; width:10px; height:10px; border-radius:50%; border:2px solid var(--panel); background:var(--faint); }
+.dot.live { background:var(--ok); }
+.dot.work { background:var(--accent); animation:pulse 1.4s ease-in-out infinite; }
+.dot.dead { background:transparent; border-color:var(--panel); box-shadow:inset 0 0 0 1.5px var(--faint); }
+@keyframes pulse { 50% { box-shadow:0 0 0 4px var(--accent-soft); } }
+.av { width:28px; height:28px; border-radius:7px; display:grid; place-items:center; font:600 11px/1 var(--mono);
+  background:hsl(var(--h) var(--av-s) var(--av-l)); color:var(--av-t); flex:none; }
+.av.sm { width:20px; height:20px; border-radius:5px; font-size:9px; }
+.who { color:hsl(var(--h) var(--name-s) var(--name-l)); font-weight:600; }
+/* stream */
+main { display:flex; flex-direction:column; min-height:0; min-width:0; }
+.filters { display:flex; gap:6px; align-items:center; padding:7px 14px; border-bottom:1px solid var(--border-soft); font-family:var(--mono);
+  font-size:12px; color:var(--muted); flex-wrap:wrap; min-height:38px; }
+.fchip { border:1px solid var(--border); border-radius:12px; padding:1px 9px; background:transparent; font-size:11.5px; color:var(--muted); }
+.fchip:hover { color:var(--text); }
+.fchip.on { border-color:var(--accent-line); color:var(--accent); background:var(--accent-soft); }
+.fchip .x { margin-left:5px; opacity:.7; }
+#stream { flex:1; overflow-y:auto; padding:8px 0 14px; scroll-behavior:auto; }
+.older { display:block; margin:6px auto 10px; }
+.day { display:flex; align-items:center; gap:10px; margin:14px 16px 6px; color:var(--faint); font:11px var(--mono); }
+.day::before,.day::after { content:""; flex:1; border-top:1px solid var(--border-soft); }
+.newline { display:flex; align-items:center; gap:10px; margin:8px 16px; color:var(--accent); font:11px var(--mono); }
+.newline::after { content:""; flex:1; border-top:1px solid var(--accent-line); }
+.thread { margin:2px 10px; border-radius:9px; }
+.thread.focus { background:var(--raised); outline:1px solid var(--border-soft); }
+.msg { display:grid; grid-template-columns:28px minmax(0,1fr); gap:0 10px; padding:6px 8px 6px 8px; border-radius:8px; position:relative; }
+.msg:hover { background:var(--hover); }
+.msg.urgent { box-shadow:inset 2px 0 0 var(--danger); background:linear-gradient(90deg,var(--danger-soft),transparent 40%); }
+.msg.mine-mention { box-shadow:inset 2px 0 0 var(--accent); background:linear-gradient(90deg,var(--accent-soft),transparent 45%); }
+.msg.fyi .text { color:var(--muted); }
+.msg.flash { animation:flash 1.6s ease-out; }
+@keyframes flash { from { background:var(--accent-soft); } }
+.meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 8px; font:12px/1.45 var(--mono); color:var(--faint); min-width:0; }
+.meta .to { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:46ch; }
+.meta .t { color:var(--faint); }
+.pill { border-radius:4px; padding:0 5px; font-size:10.5px; line-height:16px; font-weight:600; letter-spacing:.3px; }
+.pill.urgent { background:var(--danger); color:#fff; }
+.pill.fyi { border:1px solid var(--border); color:var(--faint); font-weight:500; }
+.topic { color:var(--accent); background:var(--accent-soft); border-radius:4px; padding:0 5px; font-size:11px; cursor:pointer; }
+.ticks { margin-left:auto; cursor:default; letter-spacing:-2px; padding-left:6px; font-size:12px; }
+.ticks.q { color:var(--faint); } .ticks.d { color:var(--muted); } .ticks.s { color:var(--accent); } .ticks.f { color:var(--danger); letter-spacing:0; }
+.ticks small { letter-spacing:0; margin-left:4px; font-size:10.5px; color:var(--faint); }
+.text { white-space:pre-wrap; overflow-wrap:anywhere; margin-top:1px; }
+.text.del { color:var(--faint); font-style:italic; }
+.edited { color:var(--faint); font:11px var(--mono); margin-left:4px; }
+.text code, .body code { font-family:var(--mono); font-size:12.5px; background:var(--code); border:1px solid var(--border-soft); border-radius:4px; padding:0 4px; }
+.mention { color:var(--accent); font-weight:600; }
+.mention.me { background:var(--accent-soft); border-radius:4px; padding:0 3px; }
+.task { font-family:var(--mono); font-size:11.5px; border:1px solid var(--border); border-radius:10px; padding:0 6px; color:var(--text); cursor:help;
+  background:var(--raised); white-space:nowrap; }
+.task:hover { border-color:var(--accent-line); }
+.mid { font-family:var(--mono); font-size:11.5px; color:var(--muted); text-decoration:underline dotted; cursor:pointer; }
+a { color:var(--accent); }
+.quote { border-left:2px solid var(--border); padding:0 8px; margin:2px 0 3px; color:var(--muted); font-size:12.5px; cursor:pointer;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.quote:hover { border-color:var(--accent); }
+.bodybtn { font:11.5px var(--mono); color:var(--muted); background:var(--raised); border:1px solid var(--border); border-radius:5px; padding:1px 8px; margin-top:4px; }
+.bodybtn:hover { color:var(--text); }
+.body { margin-top:6px; padding:9px 11px; border:1px solid var(--border-soft); background:var(--code); border-radius:7px;
+  font:12.5px/1.55 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere; max-height:420px; overflow:auto; }
+.body .h { color:var(--accent); font-weight:600; }
+.rx { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+.rxc { border:1px solid var(--border); background:var(--raised); border-radius:11px; padding:0 7px; font-size:12.5px; line-height:20px; }
+.rxc span { font:11px var(--mono); color:var(--muted); margin-left:3px; }
+.rxc.mine { border-color:var(--accent-line); background:var(--accent-soft); }
+.rxc:hover { border-color:var(--faint); }
+.acts { position:absolute; right:8px; top:-26px; display:none; background:var(--raised); border:1px solid var(--border);
+  border-radius:7px; box-shadow:var(--shadow); padding:2px; z-index:3; }
+.msg:hover .acts { display:flex; }
+.acts button { background:transparent; border:0; padding:3px 7px; border-radius:5px; color:var(--muted); font-size:13px; }
+.acts button:hover { background:var(--hover); color:var(--text); }
+.replies { margin-left:46px; border-left:1px solid var(--border-soft); padding-left:4px; }
+.replies .msg { padding-top:4px; padding-bottom:4px; }
+.more { font:12px var(--mono); color:var(--accent); background:transparent; border:0; padding:2px 8px 4px 46px; display:flex; gap:8px; align-items:center; }
+.more:hover { text-decoration:underline; }
+.more .avs { display:flex; gap:2px; }
+.empty { color:var(--faint); text-align:center; margin-top:18vh; font-family:var(--mono); font-size:12.5px; }
+.empty .big { font-size:30px; color:var(--accent); display:block; margin-bottom:8px; }
+.working { padding:2px 18px 4px; font:11.5px var(--mono); color:var(--faint); min-height:20px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.working .sp { color:var(--accent); display:inline-block; width:12px; }
+/* composer */
+.composer { border-top:1px solid var(--border); background:var(--panel); padding:8px 12px 10px; }
+.replyto { display:flex; align-items:center; gap:8px; font:12px var(--mono); color:var(--muted); padding:0 2px 6px; }
+.replyto[hidden] { display:none; }
+.replyto .q { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.replyto button { background:transparent; border:0; color:var(--faint); }
+.box { border:1px solid var(--border); border-radius:9px; background:var(--bg); position:relative; }
+.box:focus-within { border-color:var(--accent-line); }
+.box .prompt { position:absolute; left:11px; top:9px; color:var(--accent); font:600 13px var(--mono); pointer-events:none; }
+textarea#text { width:100%; resize:none; border:0; outline:none; background:transparent; padding:8px 12px 6px 28px; min-height:40px;
+  max-height:200px; font:13.5px/1.5 var(--mono); display:block; }
+.opts { display:flex; gap:6px; align-items:center; padding:5px 8px 6px; border-top:1px solid var(--border-soft); font:11.5px var(--mono);
+  color:var(--faint); flex-wrap:wrap; }
+.opts input[type=text], .opts select { background:transparent; border:1px solid var(--border-soft); border-radius:5px; padding:2px 6px;
+  font:11.5px var(--mono); outline:none; color:var(--muted); }
+.opts input[type=text] { width:150px; }
+.opts input.topic-in { width:90px; }
+.opts input:focus, .opts select:focus { border-color:var(--accent-line); color:var(--text); }
+.opts label { display:flex; gap:4px; align-items:center; cursor:pointer; }
+.opts label.urg input { accent-color:var(--danger); }
+.send { margin-left:auto; background:var(--accent); color:#fff; border:0; border-radius:6px; padding:3px 12px; font:600 12px var(--mono); }
+.send:disabled { opacity:.4; cursor:default; }
+.hint { font:11px var(--mono); color:var(--faint); padding:5px 2px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hint b { color:var(--muted); font-weight:500; }
+.err { color:var(--danger); }
+/* popovers */
+.pop { position:fixed; z-index:20; background:var(--raised); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow);
+  font:12px var(--mono); color:var(--text); }
+#tip { padding:7px 10px; max-width:380px; pointer-events:none; display:none; }
+#tip .r { display:flex; gap:8px; justify-content:space-between; white-space:nowrap; }
+#tip .r .w { color:var(--faint); }
+#tip .d { color:var(--faint); font-size:11px; white-space:normal; margin:-1px 0 3px 18px; }
+#ac { display:none; padding:4px; min-width:200px; max-height:240px; overflow-y:auto; }
+#ac .o { display:flex; gap:8px; align-items:center; padding:4px 8px; border-radius:5px; cursor:pointer; }
+#ac .o.sel, #ac .o:hover { background:var(--accent-soft); }
+#ac .o .k { color:var(--faint); margin-left:auto; font-size:11px; }
+#emo { display:none; padding:5px; gap:2px; flex-wrap:wrap; width:228px; }
+#emo button { background:transparent; border:0; font-size:18px; width:36px; height:34px; border-radius:6px; }
+#emo button:hover { background:var(--hover); }
+.toggle { display:none; }
+@media (max-width: 1100px) { .app { grid-template-columns:200px minmax(0,1fr) 240px; } }
+@media (max-width: 860px) {
+  .app { grid-template-columns:minmax(0,1fr); }
+  aside { display:none; position:fixed; top:44px; bottom:0; z-index:15; width:min(86vw,300px); box-shadow:var(--shadow); }
+  aside.left { left:0; } aside.right { right:0; }
+  aside.show { display:block; }
+  .toggle { display:inline-block; }
+  .crumb { display:none; }
+  .replies { margin-left:22px; }
+  .opts input[type=text] { width:110px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <button class="hbtn toggle" id="tl" title="channels">☰</button>
+    <span class="brand"><span class="star" id="star">✻</span>bus-chat</span>
+    <span class="crumb" id="crumb">#all</span>
+    <div class="search"><input id="q" placeholder="search messages, roles, __TASK_PREFIX__-…  ( / )" autocomplete="off"></div>
+    <button class="hbtn" id="notif" title="browser notifications when someone @mentions you">🔔</button>
+    <button class="hbtn" id="theme" title="light / dark">◐</button>
+    <span class="conn" id="conn" title="live stream"></span>
+    <button class="hbtn toggle" id="tr" title="lanes">⚇</button>
+  </header>
+  <aside class="left" id="left">
+    <div class="sec"><h3>channels</h3><div id="chans"></div></div>
+    <div class="sec"><h3>views</h3><div id="views"></div></div>
+    <div class="sec"><h3>pinned</h3><div id="pins"></div></div>
+    <div class="sec"><h3>today</h3><div class="card" id="today"></div></div>
+  </aside>
+  <main>
+    <div class="filters" id="filters"></div>
+    <div id="stream"></div>
+    <div class="working" id="working"></div>
+    <div class="composer">
+      <div class="replyto" id="replyto" hidden><span>↩</span><span class="q" id="replyq"></span><button id="replyx" title="cancel">✕</button></div>
+      <div class="box">
+        <span class="prompt">&gt;</span>
+        <textarea id="text" rows="1" placeholder="message… @role to notify, Enter to send, Shift+Enter for a new line"></textarea>
+        <div class="opts">
+          <span>to</span><input type="text" id="to" placeholder="roles, or empty = channel" autocomplete="off">
+          <span>cc</span><input type="text" id="cc" placeholder="roles" autocomplete="off">
+          <span>#</span><input type="text" class="topic-in" id="topic" placeholder="topic" autocomplete="off">
+          <select id="prio" title="priority"><option value="normal">normal</option><option value="fyi">fyi</option></select>
+          <label class="urg" title="types into the tab if unread after 45 s"><input type="checkbox" id="urgent">urgent</label>
+          <button class="send" id="send" disabled>send ⏎</button>
+        </div>
+      </div>
+      <div class="hint" id="hint"></div>
+    </div>
+  </main>
+  <aside class="right" id="right">
+    <div class="sec"><h3><span>lanes</span><span id="livecount"></span></h3><div id="lanes"></div></div>
+  </aside>
+</div>
+<div class="pop" id="tip"></div>
+<div class="pop" id="ac"></div>
+<div class="pop" id="emo"></div>
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const EMOJI = ['👍','✅','👀','❌','🙏','🎉','🔥','❤️','😂','🚀','⚠️','🤔'];
+const S = { me:'user', admins:[], msgs:new Map(), kids:new Map(), lanes:[], more:false, editWindow:300,
+  f:{ chan:null, role:null, thread:null, mentions:false, unread:false, q:'' }, open:new Set(), replyTo:null,
+  lastVisit:0, firstLoad:true, nodes:new Map(), tasks:new Map(), bodies:new Map(), openBodies:new Set() };
+const store = { get(k,d){ try { const v = localStorage.getItem('buschat.'+k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
+  set(k,v){ try { localStorage.setItem('buschat.'+k, JSON.stringify(v)); } catch(e){} } };
+
+// ---------- theme
+function applyTheme(t){ if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
+(function(){ const t = store.get('theme', null) || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'); applyTheme(t); })();
+$('#theme').onclick = () => { const t = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'; applyTheme(t); store.set('theme', t); };
+
+// ---------- helpers
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function hue(name){ let h = 0; for (const c of name) h = (h*31 + c.charCodeAt(0)) >>> 0; return name === 'user' ? 22 : h % 360; }
+function initials(n){ if (n === 'user') return 'you'; const b = n.replace(/^(bg|vpp)-/,''); const p = b.split(/[-_.]/).filter(Boolean);
+  return (p.length > 1 ? p[0][0] + p[1][0] : b.slice(0,2)).toUpperCase(); }
+const av = (n, sm) => `<span class="av${sm?' sm':''}" style="--h:${hue(n)}" title="${esc(n)}">${esc(initials(n))}</span>`;
+const who = n => `<span class="who" style="--h:${hue(n)}">${esc(n === 'user' ? 'you' : n)}</span>`;
+const hhmm = t => t ? t.slice(11,16) : '';
+const day = t => t ? t.slice(0,10) : '';
+function dayLabel(d){ const today = new Date(); const iso = x => x.toLocaleDateString('sv');
+  if (d === iso(today)) return 'today'; const y = new Date(today - 864e5); if (d === iso(y)) return 'yesterday';
+  return new Date(d+'T12:00').toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'}); }
+const roles = () => S.lanes.map(l => l.name);
+const ROLE_RE = () => new RegExp('(^|[^\\w@.])@(' + ['all', ...roles()].map(r => r.replace(/[.-]/g, '\\$&')).sort((a,b)=>b.length-a.length).join('|') + ')(?![\\w-])', 'g');
+function rich(s){
+  let h = esc(s);
+  h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  h = h.replace(/\b__TASK_PREFIX__-(\d+)\b/g, '<span class="task" data-task="$1">__TASK_PREFIX__-$1</span>');
+  h = h.replace(/\b(m\d{10}[0-9a-f]{8})(\.\d+)?\b/g, '<span class="mid" data-jump="$1">$1$2</span>');
+  h = h.replace(/\bhttps?:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+  if (S.lanes.length) h = h.replace(ROLE_RE(), (m, pre, r) => `${pre}<span class="mention${r===S.me||r==='all'?' me':''}">@${r}</span>`);
+  return h;
+}
+function richBody(s){
+  return s.split('\n').map(l => /^#{1,4} /.test(l) ? `<span class="h">${esc(l)}</span>` : rich(l)).join('\n');
+}
+async function api(path, data){
+  const r = await fetch(path, data === undefined ? {} : { method:'POST', headers:{'Content-Type':'application/json','X-Bus-Chat':'1'}, body:JSON.stringify(data) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// ---------- model
+const rootOf = m => (m.thread && S.msgs.has(m.thread) && m.thread !== m.id) ? m.thread : m.id;
+function upsert(m){
+  const old = S.msgs.get(m.id);
+  S.msgs.set(m.id, m);
+  if (m.thread && m.thread !== m.id) { if (!S.kids.has(m.thread)) S.kids.set(m.thread, new Set()); S.kids.get(m.thread).add(m.id); }
+  return old;
+}
+function reindex(){ S.kids.clear(); for (const m of S.msgs.values()) if (m.thread && m.thread !== m.id) {
+  if (!S.kids.has(m.thread)) S.kids.set(m.thread, new Set()); S.kids.get(m.thread).add(m.id); } }
+function threadOf(rootId){
+  const root = S.msgs.get(rootId);
+  const reps = [...(S.kids.get(rootId) || [])].map(i => S.msgs.get(i)).filter(Boolean).sort((a,b) => a.time < b.time ? -1 : 1);
+  const last = reps.length ? reps[reps.length-1].time : root.time;
+  return { root, reps, last: last > root.time ? last : root.time };
+}
+const toMe = m => m.rc.some(r => r.to === S.me && r.why !== 'post') && m.from !== S.me;
+const unreadMe = m => m.rc.some(r => r.to === S.me && r.r !== 'seen') && m.from !== S.me;
+function matches(m){
+  const f = S.f;
+  if (f.chan && (m.topic || 'all') !== f.chan) return false;
+  if (f.role && m.from !== f.role && !m.rc.some(r => r.to === f.role)) return false;
+  if (f.mentions && !toMe(m)) return false;
+  if (f.unread && !(unreadMe(m) || m.time > S.lastVisitIso)) return false;
+  if (f.q) { const q = f.q.toLowerCase(); const hay = (m.text + ' ' + m.from + ' ' + m.rc.map(r=>r.to).join(' ') + ' ' + (m.topic||'') + ' ' + m.id).toLowerCase();
+    if (!q.split(/\s+/).every(w => hay.includes(w))) return false; }
+  return true;
+}
+function visible(t){
+  if (S.f.thread) return t.root.id === S.f.thread;
+  return matches(t.root) || t.reps.some(matches);
+}
+
+// ---------- render
+function receipts(m){
+  const rc = m.rc;
+  if (!rc.length) return `<span class="ticks q" title="channel post">#</span>`;
+  const n = k => rc.filter(r => r.r === k).length;
+  const bad = n('failed') + n('expired'), seen = n('seen'), del = n('delivered');
+  let cls, mark;
+  if (bad) { cls = 'f'; mark = '⚠'; } else if (seen === rc.length) { cls = 's'; mark = '✓✓'; }
+  else if (seen + del === rc.length) { cls = 'd'; mark = seen ? '✓✓' : '✓'; } else { cls = 'q'; mark = '◷'; }
+  const frac = rc.length > 1 ? `<small>${seen}/${rc.length}</small>` : '';
+  return `<span class="ticks ${cls}" data-rc="${esc(m.id)}">${mark}${frac}</span>`;
+}
+function toLine(m){
+  const by = k => m.rc.filter(r => r.why === k).map(r => r.to === S.me ? 'you' : r.to);
+  const parts = [];
+  const to = by('to'); if (to.length) parts.push('→ ' + to.join(', '));
+  const cc = by('cc'); if (cc.length) parts.push('cc ' + cc.join(', '));
+  const at = [...by('mention'), ...by('all')]; if (at.length) parts.push('@ ' + at.join(', '));
+  const re = by('reply'); if (re.length) parts.push('↩ ' + re.join(', '));
+  const sb = by('sub'); if (sb.length) parts.push('🔔 ' + sb.join(', '));
+  if (!m.rc.length) parts.push('#' + (m.chan || m.topic || 'all'));
+  return parts.join('  ·  ');
+}
+function msgHTML(m, isReply){
+  const urgent = m.prio === 'urgent', mine = m.from === S.me;
+  const cls = ['msg', urgent ? 'urgent' : '', m.prio === 'fyi' ? 'fyi' : '', toMe(m) && !urgent ? 'mine-mention' : ''].join(' ');
+  const age = (Date.now() - Date.parse(m.time)) / 1000;
+  const canEdit = mine && !m.deleted && age < S.editWindow;
+  const parent = (!isReply || (m.re && m.re !== m.thread)) && m.re ? S.msgs.get(m.re) : null;
+  const quote = parent ? `<div class="quote" data-jump="${esc(parent.id)}">↩ ${esc(parent.from)}: ${esc(parent.text.slice(0,140))}</div>`
+              : (m.re && !isReply && !S.msgs.has(m.re) ? `<div class="quote">↩ reply to an older message ${esc(m.re)}</div>` : '');
+  const body = m.body ? (S.openBodies.has(m.id) ? `<div class="body">${S.bodies.has(m.id) ? richBody(S.bodies.get(m.id)) : 'loading…'}</div>`
+                                               : `<button class="bodybtn" data-body="${esc(m.id)}">▸ full message</button>`) : '';
+  const rx = Object.entries(m.rx || {}).map(([e, w]) => `<button class="rxc${w.includes(S.me)?' mine':''}" data-rx="${esc(e)}" data-id="${esc(m.id)}" title="${esc(w.join(', '))}">${esc(e)}<span>${w.length}</span></button>`).join('');
+  return `<div class="${cls}" id="m-${esc(m.id)}" data-id="${esc(m.id)}">
+    ${av(m.from)}
+    <div style="min-width:0">
+      <div class="meta">${who(m.from)}<span class="to">${esc(toLine(m))}</span>
+        ${urgent ? '<span class="pill urgent">URGENT</span>' : m.prio === 'fyi' ? '<span class="pill fyi">fyi</span>' : ''}
+        ${m.topic ? `<span class="topic" data-chan="${esc(m.topic)}">#${esc(m.topic)}</span>` : ''}
+        ${m.pin ? '<span title="pinned">📌</span>' : ''}
+        <span class="t" title="${esc(m.time)} · ${esc(m.id)}">${hhmm(m.time)}</span>${receipts(m)}</div>
+      ${quote}
+      <div class="text${m.deleted ? ' del' : ''}">${m.deleted ? 'message deleted' : rich(m.text)}${m.edited ? '<span class="edited">(edited)</span>' : ''}</div>
+      ${body}
+      ${rx ? `<div class="rx">${rx}</div>` : ''}
+    </div>
+    <div class="acts">
+      <button data-act="reply" title="reply">↩</button><button data-act="react" title="react">☺</button>
+      <button data-act="pin" title="${m.pin?'unpin':'pin'}">📌</button>
+      <button data-act="sub" title="${(S.msgs.get(rootOf(m))?.subs||[]).includes(S.me)?'unfollow thread':'follow thread (replies notify you)'}">🔔</button>
+      <button data-act="thread" title="open thread">⇲</button><button data-act="copy" title="copy id">#</button>
+      ${canEdit ? '<button data-act="edit" title="edit (5 min)">✎</button><button data-act="del" title="delete (5 min)">🗑</button>' : ''}
+    </div></div>`;
+}
+function threadHTML(t){
+  const open = S.open.has(t.root.id) || S.f.thread === t.root.id || !!S.f.q;
+  const vis = t.reps.filter(m => S.f.thread || !S.f.q || matches(m));
+  let reps = '';
+  if (t.reps.length) {
+    const shown = open ? vis : t.reps.slice(-1);
+    const hidden = t.reps.length - shown.length;
+    const people = [...new Set(t.reps.map(r => r.from))].slice(0,5);
+    if (hidden > 0 || open) reps += `<button class="more" data-toggle="${esc(t.root.id)}"><span class="avs">${people.map(p => av(p, 1)).join('')}</span>
+      ${open ? '▾ collapse' : `▸ ${hidden} more repl${hidden===1?'y':'ies'}`} · last ${hhmm(t.last)}</button>`;
+    reps += `<div class="replies">${shown.map(m => msgHTML(m, true)).join('')}</div>`;
+  }
+  return msgHTML(t.root, false) + reps;
+}
+function threads(){
+  const roots = [...S.msgs.values()].filter(m => rootOf(m) === m.id);
+  return roots.map(r => threadOf(r.id)).sort((a,b) => a.last < b.last ? -1 : a.last > b.last ? 1 : 0);
+}
+let stickBottom = true;
+function renderStream(){
+  const el = $('#stream');
+  const ts = threads().filter(visible);
+  S.nodes.clear();
+  const parts = [];
+  if (S.more) parts.push('<button class="hbtn older" id="older">load older</button>');
+  let lastDay = null, newShown = false;
+  for (const t of ts) {
+    const d = day(t.last);
+    if (d !== lastDay) { parts.push(`<div class="day">${esc(dayLabel(d))}</div>`); lastDay = d; }
+    if (!newShown && S.lastVisitIso && t.last > S.lastVisitIso && !S.firstLoad) { parts.push('<div class="newline">new since your last visit</div>'); newShown = true; }
+    parts.push(`<div class="thread${S.f.thread===t.root.id?' focus':''}" id="t-${esc(t.root.id)}">${threadHTML(t)}</div>`);
+  }
+  if (!ts.length) parts.push(`<div class="empty"><span class="big">✻</span>${S.msgs.size ? 'nothing matches these filters' : 'no messages yet'}</div>`);
+  el.innerHTML = parts.join('');
+  const o = $('#older'); if (o) o.onclick = loadOlder;
+  if (stickBottom) el.scrollTop = el.scrollHeight;
+}
+function renderThreadNode(rootId){
+  const t = threadOf(rootId);
+  const el = $('#stream');
+  const node = document.getElementById('t-' + rootId);
+  const vis = visible(t);
+  if (!vis) { if (node) node.remove(); return; }
+  if (!node) return renderStream();
+  node.innerHTML = threadHTML(t);
+}
+$('#stream').addEventListener('scroll', e => { const s = e.target; stickBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 60; });
+
+function renderFilters(){
+  const f = S.f, chips = [];
+  const chip = (label, key, on) => `<button class="fchip${on?' on':''}" data-f="${key}">${label}${on && key.startsWith('x:') ? '<span class="x">✕</span>' : ''}</button>`;
+  chips.push(chip('@ mentions me', 'mentions', f.mentions));
+  chips.push(chip('● unread', 'unread', f.unread));
+  if (f.chan) chips.push(chip('#' + esc(f.chan), 'x:chan', true));
+  if (f.role) chips.push(chip('role ' + esc(f.role), 'x:role', true));
+  if (f.thread) chips.push(chip('thread ' + esc(f.thread.slice(-8)), 'x:thread', true));
+  if (f.q) chips.push(chip('“' + esc(f.q) + '”', 'x:q', true));
+  const n = threads().filter(visible).length;
+  $('#filters').innerHTML = chips.join('') + `<span style="margin-left:auto">${n} thread${n===1?'':'s'}</span>`;
+  $('#crumb').textContent = (f.chan ? '#' + f.chan : '#all') + (f.role ? ' · ' + f.role : '') + (f.thread ? ' · thread' : '');
+}
+$('#filters').addEventListener('click', e => {
+  const b = e.target.closest('[data-f]'); if (!b) return;
+  const k = b.dataset.f;
+  if (k === 'mentions' || k === 'unread') S.f[k] = !S.f[k];
+  else { const key = k.slice(2); S.f[key] = key === 'q' ? '' : null; if (key === 'q') $('#q').value = ''; }
+  refresh();
+});
+
+function renderSide(){
+  const counts = new Map(); const unreadBy = new Map();
+  for (const m of S.msgs.values()) { const c = m.topic || 'all'; counts.set(c, (counts.get(c) || 0) + 1);
+    if (unreadMe(m)) unreadBy.set(c, (unreadBy.get(c) || 0) + 1); }
+  const chans = [...counts.entries()].filter(([c]) => c !== 'all').sort((a,b) => b[1]-a[1]).slice(0, 18);
+  const totalUnread = [...unreadBy.values()].reduce((a,b)=>a+b, 0);
+  const row = (c, n, u) => `<div class="item${(S.f.chan||'*')===c?' sel':''}" data-chan="${esc(c)}"># ${esc(c === '*' ? 'all' : c)}${u ? `<span class="badge">${u}</span>` : `<span class="n">${n}</span>`}</div>`;
+  $('#chans').innerHTML = row('*', S.msgs.size, totalUnread) + chans.map(([c, n]) => row(c, n, unreadBy.get(c))).join('');
+  const mine = [...S.msgs.values()].filter(toMe).length, un = [...S.msgs.values()].filter(unreadMe).length;
+  $('#views').innerHTML = `<div class="item${S.f.mentions?' sel':''}" data-view="mentions">@ to you<span class="${un?'badge':'n'}">${un || mine}</span></div>
+    <div class="item${S.f.unread?' sel':''}" data-view="unread">● unread</div>`;
+  const pins = [...S.msgs.values()].filter(m => m.pin).sort((a,b) => a.time < b.time ? 1 : -1);
+  $('#pins').innerHTML = pins.length ? pins.map(m => `<div class="pinitem" data-jump="${esc(m.id)}" title="${esc(m.text)}">📌 ${esc(m.from)}: ${esc(m.text)}</div>`).join('')
+                                     : '<div class="pinitem" style="cursor:default">hover a message → 📌</div>';
+  // today card
+  const today = new Date().toLocaleDateString('sv');
+  const tm = [...S.msgs.values()].filter(m => day(m.time) === today);
+  const by = new Map(); for (const m of tm) by.set(m.from, (by.get(m.from) || 0) + 1);
+  const top = [...by.entries()].sort((a,b) => b[1]-a[1]).slice(0, 4);
+  const urg = tm.filter(m => m.prio === 'urgent').length;
+  const failed = tm.filter(m => m.rc.some(r => r.r === 'failed' || r.r === 'expired')).length;
+  const rx = tm.reduce((a, m) => a + Object.values(m.rx || {}).reduce((x, w) => x + w.length, 0), 0);
+  const thr = new Set(tm.map(m => rootOf(m))).size;
+  $('#today').innerHTML = `<div class="row"><span><b>${tm.length}</b> messages</span><span><b>${thr}</b> threads</span></div>
+    <div class="stats"><span><b style="color:${urg?'var(--danger)':'inherit'}">${urg}</b>urgent</span><span><b style="color:${failed?'var(--danger)':'inherit'}">${failed}</b>failed</span><span><b>${rx}</b>reacts</span></div>
+    <div style="margin-top:6px">${top.map(([n, c]) => `<div class="row"><span>${who(n)}</span><span>${c}</span></div>`).join('') || 'quiet so far'}</div>`;
+}
+$('#left').addEventListener('click', e => {
+  const c = e.target.closest('[data-chan]'); if (c) { S.f.chan = c.dataset.chan === '*' ? null : c.dataset.chan; S.f.thread = null; refresh(); return; }
+  const v = e.target.closest('[data-view]'); if (v) { S.f[v.dataset.view] = !S.f[v.dataset.view]; refresh(); return; }
+  const j = e.target.closest('[data-jump]'); if (j) jump(j.dataset.jump);
+});
+
+const SPIN = ['◐','◓','◑','◒']; let spinI = 0;
+function renderLanes(){
+  const L = S.lanes.filter(l => l.name !== 'bus-deliver');
+  const live = L.filter(l => l.live).length;
+  $('#livecount').textContent = `${live}/${L.length} live`;
+  const order = l => (l.name === 'user' ? -1 : l.working ? 0 : l.live ? 1 : l.live === null ? 2 : 3);
+  $('#lanes').innerHTML = [...L].sort((a,b) => order(a) - order(b) || a.name.localeCompare(b.name)).map(l => {
+    const st = l.working ? 'work' : l.live ? 'live' : l.live === false ? 'dead' : '';
+    const status = l.name === 'user' ? 'the human (this page)' : l.working ? 'working · ' + l.title : l.live ? 'idle · ' + l.title : l.live === false ? 'tab closed (mail waits for the role)' : 'liveness unknown';
+    const task = (l.tasks || [])[0];
+    return `<div class="lane${S.f.role===l.name?' sel':''}${l.live===false?' dead':''}" data-role="${esc(l.name)}" title="${esc(l.name)} · ${esc(l.mode||'')} · last post ${esc(hhmm(l.last)||'-')}">
+      <span class="av" style="--h:${hue(l.name)}">${esc(initials(l.name))}<span class="dot ${st}"></span></span>
+      <span class="nm who" style="--h:${hue(l.name)}">${esc(l.name)}</span>
+      ${l.unread ? `<span class="badge" title="unread in its inbox (not fyi)">${l.unread}</span>` : '<span></span>'}
+      <span class="ttl">${esc(status)}</span>
+      ${task ? `<span class="tk"><span class="task" data-task="${task.id}">__TASK_PREFIX__-${task.id}</span> ${esc(task.title)}</span>` : ''}
+    </div>`; }).join('');
+  renderWorking();
+}
+function renderWorking(){
+  const w = S.lanes.filter(l => l.working).map(l => l.name);
+  $('#working').innerHTML = w.length ? `<span class="sp">${SPIN[spinI % 4]}</span> ${w.map(esc).join(', ')} ${w.length === 1 ? 'is' : 'are'} working…` : '';
+  $('#star').classList.toggle('live', w.length > 0);
+}
+setInterval(() => { spinI++; const sp = document.querySelector('#working .sp'); if (sp) sp.textContent = SPIN[spinI % 4]; }, 250);
+$('#lanes').addEventListener('click', e => {
+  const t = e.target.closest('.task'); if (t) { S.f.q = '__TASK_PREFIX__-' + t.dataset.task; $('#q').value = S.f.q; refresh(); return; }
+  const l = e.target.closest('[data-role]'); if (!l) return;
+  if (e.altKey || e.shiftKey) { insertMention(l.dataset.role); return; }
+  S.f.role = S.f.role === l.dataset.role ? null : l.dataset.role; refresh();
+});
+function refresh(){ renderFilters(); renderStream(); renderSide(); renderLanes(); }
+
+// ---------- stream interactions
+function jump(id){
+  let m = S.msgs.get(id);
+  if (!m) { flashErr('that message is older than what is loaded'); return; }
+  const root = rootOf(m);
+  S.open.add(root);
+  if (!visible(threadOf(root))) { S.f = { chan:null, role:null, thread:null, mentions:false, unread:false, q:'' }; $('#q').value = ''; }
+  refresh();
+  const el = document.getElementById('m-' + id);
+  if (el) { stickBottom = false; el.scrollIntoView({block:'center'}); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+}
+$('#stream').addEventListener('click', async e => {
+  const tg = e.target;
+  const tog = tg.closest('[data-toggle]');
+  if (tog) { const id = tog.dataset.toggle; S.open.has(id) ? S.open.delete(id) : S.open.add(id); renderThreadNode(id); return; }
+  const j = tg.closest('[data-jump]'); if (j) { jump(j.dataset.jump); return; }
+  const ch = tg.closest('[data-chan]'); if (ch) { S.f.chan = ch.dataset.chan; refresh(); return; }
+  const tk = tg.closest('.task'); if (tk) { S.f.q = '__TASK_PREFIX__-' + tk.dataset.task; $('#q').value = S.f.q; refresh(); return; }
+  const b = tg.closest('[data-body]');
+  if (b) { const id = b.dataset.body; S.openBodies.add(id);
+    if (!S.bodies.has(id)) { try { S.bodies.set(id, (await api('/api/body?id=' + encodeURIComponent(id))).body || '(no body)'); } catch (er) { S.bodies.set(id, '(body unavailable: ' + er.message + ')'); } }
+    renderThreadNode(rootOf(S.msgs.get(id))); return; }
+  const rx = tg.closest('[data-rx]');
+  if (rx) { const m = S.msgs.get(rx.dataset.id); const on = !(m.rx[rx.dataset.rx] || []).includes(S.me);
+    api('/api/react', { id:m.id, emoji:rx.dataset.rx, on }).catch(er => flashErr(er.message)); return; }
+  const a = tg.closest('[data-act]'); if (!a) return;
+  const m = S.msgs.get(a.closest('.msg').dataset.id);
+  const act = a.dataset.act;
+  if (act === 'reply') setReply(m);
+  else if (act === 'react') openEmoji(a, m);
+  else if (act === 'pin') api('/api/pin', { id:m.id, on:!m.pin }).catch(er => flashErr(er.message));
+  else if (act === 'sub') { const root = S.msgs.get(rootOf(m)); api('/api/sub', { id:root.id, on:!(root.subs||[]).includes(S.me) }).catch(er => flashErr(er.message)); }
+  else if (act === 'thread') { S.f.thread = S.f.thread === rootOf(m) ? null : rootOf(m); refresh(); }
+  else if (act === 'copy') { navigator.clipboard?.writeText(m.id); flashHint('copied ' + m.id); }
+  else if (act === 'edit') startEdit(m);
+  else if (act === 'del') api('/api/delete', { id:m.id }).catch(er => flashErr(er.message));
+});
+function startEdit(m){
+  const el = document.querySelector(`#m-${CSS.escape(m.id)} .text`);
+  if (!el) return;
+  el.innerHTML = `<textarea class="edit" style="width:100%;min-height:52px;font:13px var(--mono);background:var(--bg);border:1px solid var(--accent-line);border-radius:6px;padding:6px">${esc(m.text)}</textarea><div class="hint">Enter save · Esc cancel</div>`;
+  const ta = el.querySelector('textarea'); ta.focus();
+  ta.onkeydown = ev => {
+    if (ev.key === 'Escape') renderThreadNode(rootOf(m));
+    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); api('/api/edit', { id:m.id, text:ta.value }).catch(er => { flashErr(er.message); renderThreadNode(rootOf(m)); }); }
+  };
+}
+
+// ---------- tooltips (receipts, tasks)
+const tip = $('#tip');
+function showTip(target, html){ tip.innerHTML = html; tip.style.display = 'block';
+  const r = target.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width/2 - w/2)) + 'px';
+  tip.style.top = (r.top - h - 8 > 0 ? r.top - h - 8 : r.bottom + 8) + 'px'; }
+const TICK = { queued:['◷','queued'], delivered:['✓','delivered'], seen:['✓✓','seen'], failed:['⚠','failed'], expired:['⌛','expired'] };
+document.addEventListener('mouseover', async e => {
+  const rc = e.target.closest('[data-rc]');
+  if (rc) { const m = S.msgs.get(rc.dataset.rc); if (!m) return;
+    showTip(rc, m.rc.map(r => `<div class="r"><span>${TICK[r.r]?.[0] || '?'} ${esc(r.to === S.me ? 'you' : r.to)}</span><span class="w">${esc(r.why)} · ${TICK[r.r]?.[1] || r.r}</span></div>`
+      + ((r.r === 'failed' || r.r === 'expired') && r.d ? `<div class="d">${esc(r.d)}</div>` : '')).join('')); return; }
+  const tk = e.target.closest('.task');
+  if (tk) { const id = tk.dataset.task;
+    if (!S.tasks.has(id)) { showTip(tk, '__TASK_PREFIX__-' + esc(id) + ' …'); try { S.tasks.set(id, await api('/api/task?id=' + id)); } catch (er) { S.tasks.set(id, {}); } }
+    const t = S.tasks.get(id);
+    if (tk.matches(':hover')) showTip(tk, t && t.title ? `<b>__TASK_PREFIX__-${t.id}</b> ${esc(t.title)}<div class="r" style="margin-top:4px"><span class="w">${esc(t.status)} · ${esc(t.priority)} · ${esc(t.kind)}</span><span>${esc(t.assignee || 'unassigned')}</span></div>` : `__TASK_PREFIX__-${esc(id)}: not in the tracker`);
+    return; }
+});
+document.addEventListener('mouseout', e => { if (e.target.closest('[data-rc],.task')) tip.style.display = 'none'; });
+
+// ---------- emoji palette
+const emo = $('#emo'); let emoFor = null;
+emo.innerHTML = EMOJI.map(e => `<button data-e="${e}">${e}</button>`).join('');
+function openEmoji(btn, m){ emoFor = m; emo.style.display = 'flex'; const r = btn.getBoundingClientRect();
+  emo.style.left = Math.max(8, Math.min(innerWidth - 240, r.right - 228)) + 'px'; emo.style.top = (r.bottom + 6 + 120 > innerHeight ? r.top - 90 : r.bottom + 6) + 'px'; }
+emo.addEventListener('click', e => { const b = e.target.closest('[data-e]'); if (!b || !emoFor) return;
+  const on = !((emoFor.rx || {})[b.dataset.e] || []).includes(S.me);
+  api('/api/react', { id:emoFor.id, emoji:b.dataset.e, on }).catch(er => flashErr(er.message)); emo.style.display = 'none'; });
+document.addEventListener('mousedown', e => { if (!e.target.closest('#emo,[data-act="react"]')) emo.style.display = 'none'; if (!e.target.closest('#ac')) hideAc(); });
+
+// ---------- composer
+const ta = $('#text');
+function setReply(m){ S.replyTo = m; $('#replyto').hidden = false;
+  $('#replyq').innerHTML = `replying to ${who(m.from)}: ${esc(m.text.slice(0, 160))}`;
+  if (m.topic && !$('#topic').value) $('#topic').value = m.topic;
+  ta.focus(); updateHint(); }
+$('#replyx').onclick = () => { S.replyTo = null; $('#replyto').hidden = true; updateHint(); };
+function autosize(){ ta.style.height = 'auto'; ta.style.height = Math.min(200, ta.scrollHeight) + 'px'; }
+const list = s => s.split(/[\s,]+/).map(x => x.replace(/^@/, '').trim()).filter(Boolean);
+function notified(){
+  const text = ta.value, out = new Map(), rs = new Set(roles());
+  const add = (n, why) => { if (n && n !== S.me && rs.has(n) && !out.has(n)) out.set(n, why); };
+  for (const n of list($('#to').value)) add(n, 'to');
+  for (const n of list($('#cc').value)) add(n, 'cc');
+  for (const m of text.matchAll(ROLE_RE())) { if (m[2] === 'all') { for (const r of rs) if (r !== 'bus-deliver') add(r, 'all'); } else add(m[2], 'mention'); }
+  if (S.replyTo) { add(S.replyTo.from, 'reply'); for (const s of (S.msgs.get(rootOf(S.replyTo))?.subs || [])) add(s, 'sub'); }
+  add('coordinator', 'watch');
+  return out;
+}
+function updateHint(){
+  const n = notified(), bad = list($('#to').value).concat(list($('#cc').value)).filter(r => !roles().includes(r));
+  const chan = $('#topic').value.trim() || S.f.chan || 'all';
+  const parts = [...n.entries()].map(([r, w]) => `<b>${esc(r)}</b> <span>(${w})</span>`);
+  $('#hint').innerHTML = (bad.length ? `<span class="err">unknown: ${esc(bad.join(', '))}</span> · ` : '')
+    + (parts.length ? 'notifies ' + parts.join(', ') : 'nobody notified')
+    + ` · in #${esc(chan)}` + ($('#urgent').checked ? ' · <span class="err">URGENT: typed into idle tabs after 45 s</span>' : '');
+  $('#send').disabled = !ta.value.trim() || bad.length > 0;
+}
+['input','change'].forEach(ev => ['#to','#cc','#topic','#urgent','#prio'].forEach(s => $(s).addEventListener(ev, updateHint)));
+ta.addEventListener('input', () => { autosize(); updateHint(); acUpdate(); store.set('draft', ta.value); });
+ta.addEventListener('keydown', e => {
+  if (acOpen()) { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); acMove(e.key === 'ArrowDown' ? 1 : -1); return; }
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); acPick(); return; } if (e.key === 'Escape') { hideAc(); return; } }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  if (e.key === 'Escape' && S.replyTo) $('#replyx').click();
+});
+$('#send').onclick = send;
+async function send(){
+  const text = ta.value.trim(); if (!text || $('#send').disabled) return;
+  const d = { text, to:list($('#to').value), cc:list($('#cc').value), topic:$('#topic').value.trim() || S.f.chan || null,
+              chan:$('#topic').value.trim() || S.f.chan || 'all', prio:$('#prio').value, urgent:$('#urgent').checked, re:S.replyTo?.id || null };
+  $('#send').disabled = true;
+  try { await api('/api/send', d); ta.value = ''; store.set('draft', ''); autosize(); $('#urgent').checked = false; $('#replyx').click(); stickBottom = true; }
+  catch (er) { flashErr(er.message); }
+  updateHint();
+}
+function insertMention(r){ const p = ta.selectionStart ?? ta.value.length; const pre = ta.value.slice(0, p);
+  ta.value = pre + (pre && !/\s$/.test(pre) ? ' ' : '') + '@' + r + ' ' + ta.value.slice(p); ta.focus(); updateHint(); }
+let hintTimer;
+function flashHint(s, err){ $('#hint').innerHTML = `<span class="${err?'err':''}">${esc(s)}</span>`; clearTimeout(hintTimer); hintTimer = setTimeout(updateHint, 3500); }
+const flashErr = s => flashHint('⚠ ' + s, true);
+
+// @-autocomplete (textarea + to/cc fields)
+const ac = $('#ac'); let acItems = [], acI = 0, acCtx = null;
+const acOpen = () => ac.style.display === 'block';
+function hideAc(){ ac.style.display = 'none'; acCtx = null; }
+function acUpdate(){
+  const p = ta.selectionStart, pre = ta.value.slice(0, p), m = pre.match(/(^|\s)@([\w.-]*)$/);
+  if (!m) return hideAc();
+  showAc(m[2], ta, { el:ta, start:p - m[2].length, end:p, at:true });
+}
+function showAc(q, anchor, ctx){
+  const L = S.lanes.filter(l => l.name !== S.me && l.name !== 'bus-deliver');
+  acItems = L.filter(l => l.name.includes(q.toLowerCase())).sort((a,b) => (b.live?1:0) - (a.live?1:0) || a.name.indexOf(q) - b.name.indexOf(q)).slice(0, 9);
+  if (S.admins.includes(S.me) && 'all'.startsWith(q) && ctx.at) acItems.push({ name:'all', live:true, all:true });
+  if (!acItems.length) return hideAc();
+  acI = 0; acCtx = ctx; renderAc();
+  const r = anchor.getBoundingClientRect(); ac.style.display = 'block';
+  ac.style.left = (r.left + 8) + 'px'; ac.style.top = Math.max(8, r.top - ac.offsetHeight - 6) + 'px';
+}
+function renderAc(){ ac.innerHTML = acItems.map((l, i) => `<div class="o${i===acI?' sel':''}" data-i="${i}">${l.all ? '<span class="av sm" style="--h:22">@</span>' : av(l.name, 1)}<span>${esc(l.name)}</span><span class="k">${l.all ? 'everyone' : l.working ? 'working' : l.live ? 'live' : l.live === false ? 'closed' : ''}</span></div>`).join(''); }
+function acMove(d){ acI = (acI + d + acItems.length) % acItems.length; renderAc(); }
+function acPick(i){
+  const l = acItems[i ?? acI]; if (!l || !acCtx) return;
+  const el = acCtx.el;
+  if (acCtx.at) { el.value = el.value.slice(0, acCtx.start) + l.name + ' ' + el.value.slice(acCtx.end); el.selectionStart = el.selectionEnd = acCtx.start + l.name.length + 1; }
+  else { const parts = el.value.split(','); parts[parts.length - 1] = ' ' + l.name; el.value = parts.join(',').replace(/^\s+/, '') + ', '; }
+  hideAc(); el.focus(); updateHint(); autosize();
+}
+ac.addEventListener('mousedown', e => { const o = e.target.closest('[data-i]'); if (o) { e.preventDefault(); acPick(+o.dataset.i); } });
+for (const s of ['#to', '#cc']) {
+  const el = $(s);
+  el.addEventListener('input', () => { const q = el.value.split(',').pop().trim(); showAc(q, el, { el, at:false }); });
+  el.addEventListener('keydown', e => { if (!acOpen()) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); acMove(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); acPick(); } else if (e.key === 'Escape') hideAc(); });
+  el.addEventListener('blur', () => setTimeout(hideAc, 120));
+}
+
+// ---------- search + keys
+let qTimer;
+$('#q').addEventListener('input', e => { clearTimeout(qTimer); qTimer = setTimeout(() => { S.f.q = e.target.value.trim(); refresh(); }, 160); });
+document.addEventListener('keydown', e => {
+  if (e.key === '/' && document.activeElement.tagName !== 'TEXTAREA' && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); $('#q').focus(); }
+  if (e.key === 'Escape' && document.activeElement === $('#q')) { $('#q').value = ''; S.f.q = ''; refresh(); $('#q').blur(); }
+});
+$('#tl').onclick = () => $('#left').classList.toggle('show');
+$('#tr').onclick = () => $('#right').classList.toggle('show');
+
+// ---------- notifications
+function notifState(){ const on = store.get('notify', false) && 'Notification' in window && Notification.permission === 'granted';
+  $('#notif').classList.toggle('on', on); $('#notif').title = on ? 'notifications on (click to turn off)' : 'browser notifications when someone @mentions you'; return on; }
+$('#notif').onclick = async () => {
+  if (!('Notification' in window)) return flashErr('this browser has no notifications');
+  if (store.get('notify', false)) store.set('notify', false);
+  else { const p = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission(); store.set('notify', p === 'granted'); }
+  notifState();
+};
+function notify(m){
+  if (!notifState() || !toMe(m) || document.hasFocus()) return;
+  try { const n = new Notification(`${m.from}${m.prio === 'urgent' ? ' (URGENT)' : ''}`, { body:m.text.slice(0, 180), tag:m.id });
+    n.onclick = () => { window.focus(); jump(m.id); n.close(); }; } catch (e) {}
+}
+
+// ---------- seen (the user's own receipts)
+let seenTimer;
+function markSeen(){ clearTimeout(seenTimer); seenTimer = setTimeout(() => {
+  if (!document.hasFocus() || document.hidden) return;
+  const ids = [...S.msgs.values()].filter(unreadMe).map(m => m.id);
+  if (ids.length) api('/api/seen', { ids }).catch(() => {});
+}, 1200); }
+window.addEventListener('focus', markSeen);
+document.addEventListener('visibilitychange', markSeen);
+window.addEventListener('beforeunload', () => store.set('lastVisit', new Date().toISOString()));
+
+// ---------- data
+async function loadOlder(){
+  const oldest = threads()[0]; if (!oldest) return;
+  const el = $('#stream'), h = el.scrollHeight;
+  const r = await api('/api/older?before=' + encodeURIComponent(oldest.last));
+  r.msgs.forEach(upsert); reindex(); S.more = r.more; stickBottom = false;
+  refresh(); el.scrollTop = el.scrollHeight - h;
+}
+async function init(){
+  const r = await api('/api/init');
+  S.me = r.me; S.admins = r.admins; S.lanes = r.lanes; S.more = r.more; S.editWindow = r.edit_window;
+  S.msgs.clear(); r.msgs.forEach(upsert); reindex();
+  const lv = store.get('lastVisit', null); S.lastVisitIso = lv ? toLocalIso(lv) : '';
+  refresh(); S.firstLoad = false; markSeen();
+}
+function toLocalIso(iso){ const d = new Date(iso), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+function connect(){
+  const es = new EventSource('/api/events');
+  let dropped = false;
+  es.onopen = () => { $('#conn').className = 'conn ok'; $('#conn').title = 'live'; if (dropped) init(); dropped = false; };
+  es.onerror = () => { $('#conn').className = 'conn bad'; $('#conn').title = 'reconnecting…'; dropped = true; };
+  es.addEventListener('msgs', e => {
+    const list = JSON.parse(e.data), touched = new Set(); let structural = false;
+    for (const m of list) {
+      const old = upsert(m);
+      if (!old) { notify(m); if (m.thread && m.thread !== m.id && !S.msgs.has(m.thread)) structural = true; }
+      touched.add(rootOf(m));
+      if (!old && rootOf(m) === m.id && S.kids.has(m.id)) structural = true;
+    }
+    const ordered = threads().map(t => t.root.id);
+    const lastIds = ordered.slice(-touched.size);
+    // a thread whose activity moved it to the end is re-rendered in place at the bottom
+    if (structural || ![...touched].every(id => document.getElementById('t-' + id) || !visible(threadOf(id)))) renderStream();
+    else for (const id of touched) {
+      const node = document.getElementById('t-' + id);
+      if (node && lastIds.includes(id) && node !== $('#stream').lastElementChild) $('#stream').appendChild(node);
+      renderThreadNode(id);
+    }
+    if (stickBottom) $('#stream').scrollTop = $('#stream').scrollHeight;
+    renderFilters(); renderSide(); markSeen();
+  });
+  es.addEventListener('lanes', e => { S.lanes = JSON.parse(e.data).lanes; renderLanes(); });
+}
+ta.value = store.get('draft', ''); autosize(); notifState();
+init().then(connect).catch(er => { $('#stream').innerHTML = `<div class="empty"><span class="big">✻</span>cannot reach the bus: ${esc(er.message)}</div>`; setTimeout(() => location.reload(), 5000); });
+</script>
+</body>
+</html>
