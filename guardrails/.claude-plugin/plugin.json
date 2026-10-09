@@ -1,0 +1,42 @@
+{
+  "name": "guardrails",
+  "version": "0.1.0",
+  "description": "A lint gate for Claude's edits: your project's rules, a baseline of existing violations, and a PreToolUse check that refuses only edits adding new ones.",
+  "author": {
+    "name": "Azoof Ahmed"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "When an edit adds a violation",
+      "description": "block refuses the edit and tells Claude which rules it broke; warn lets it through and shows a toast.",
+      "default": "block",
+      "options": ["block", "warn"]
+    },
+    "paths": {
+      "type": "string",
+      "title": "Files the gate covers",
+      "description": "Comma-separated globs, relative to the project root (**, *, ?, {a,b}). Each rule also has its own paths.",
+      "default": "**"
+    },
+    "rulesFile": {
+      "type": "string",
+      "title": "Rules file",
+      "description": "The project's rules, relative to the project root. Empty: .claude/guardrails.toml, else .claude/guardrails.json.",
+      "default": ""
+    },
+    "baselineFile": {
+      "type": "string",
+      "title": "Baseline file",
+      "description": "Where existing violations are recorded (guard.py baseline). Only violations not in it fail.",
+      "default": ".claude/guardrails.baseline.json"
+    },
+    "python": {
+      "type": "string",
+      "title": "Python",
+      "description": "The Python 3.9+ executable that runs the rules (python, python3, py, or a full path). TOML rules need 3.11+.",
+      "default": "python"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "scan": { "include": ["**"], "exclude": ["**/fixtures/**"] },
+  "rules": [
+    {
+      "id": "no-todo-in-src",
+      "pattern": "\\b(TODO|FIXME|XXX|HACK)\\b",
+      "message": "Unfinished-work marker in shipped code. Finish it, or track it in the issue tracker.",
+      "paths": ["src/**"],
+      "exclude": ["**/*.test.*", "**/*.spec.*"]
+    },
+    {
+      "id": "no-console-log",
+      "pattern": "console\\.(log|debug)\\(",
+      "message": "console.log in src. Use the project's logger.",
+      "paths": ["src/**/*.{js,jsx,ts,tsx,mjs,cjs}"],
+      "exclude": ["**/*.test.*"]
+    },
+    {
+      "id": "no-hardcoded-secret",
+      "pattern": "(?i)\\b(api[_-]?key|secret|password|passwd|token)\\b\\s*[:=]\\s*[\"'][^\"'\\s]{8,}[\"']|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "message": "Looks like a hardcoded secret. Read it from the environment or a secret store.",
+      "paths": ["**"],
+      "exclude": ["**/*.md", "**/*.lock", ".claude/guardrails.*"]
+    },
+    {
+      "id": "no-debugger",
+      "pattern": "^\\s*(debugger;|breakpoint\\(\\)|import pdb|pdb\\.set_trace\\(\\))",
+      "message": "Debugger statement left in.",
+      "severity": "warn"
+    }
+  ]
+}

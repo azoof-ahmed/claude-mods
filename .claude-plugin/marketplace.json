@@ -1,0 +1,15 @@
+{
+  "name": "claude-mods",
+  "description": "General-purpose Claude Code mods: a coordinator for many worker agents, an agent message bus with web and terminal chat, a task tracker, a code index, edit guardrails and a heavy-job guard.",
+  "owner": {
+    "name": "Azoof Ahmed"
+  },
+  "plugins": [
+    { "name": "coordinator", "source": "./coordinator" },
+    { "name": "agent-bus", "source": "./agent-bus" },
+    { "name": "task-tracker", "source": "./task-tracker" },
+    { "name": "code-index", "source": "./code-index" },
+    { "name": "guardrails", "source": "./guardrails" },
+    { "name": "heavy-job-guard", "source": "./heavy-job-guard" }
+  ]
+}

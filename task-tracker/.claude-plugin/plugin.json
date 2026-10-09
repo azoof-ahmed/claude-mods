@@ -1,0 +1,66 @@
+{
+  "name": "task-tracker",
+  "version": "0.1.0",
+  "description": "A shared task tracker for agents and people working in one repository: claim tasks, declare the files you touch, get refused on overlaps, review. /tasks board pane, status line, a band for conflicts and reviews, toasts for blocked tasks.",
+  "author": {
+    "name": "Azoof Ahmed"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "python": {
+      "type": "string",
+      "title": "Python command",
+      "description": "The interpreter that runs the tracker CLI (Python 3.9 or newer). If it does not start, python, python3 and py are tried in turn.",
+      "default": "python"
+    },
+    "identity": {
+      "type": "string",
+      "title": "Your name in the tracker",
+      "description": "The name the /tasks pane acts as; the roles file gives it a level. Agents use --as <name> or TASKS_AS.",
+      "default": "user"
+    },
+    "idPrefix": {
+      "type": "string",
+      "title": "Task id prefix",
+      "description": "Task ids read <prefix>-<n>, e.g. TASK-12.",
+      "default": "TASK"
+    },
+    "dbPath": {
+      "type": "string",
+      "title": "Database path",
+      "description": "The SQLite file, relative to the project root (nearest folder with .git or .claude).",
+      "default": ".claude/tasks/tasks.db"
+    },
+    "rolesFile": {
+      "type": "string",
+      "title": "Roles file",
+      "description": "TOML file of names and permission levels, relative to the project root. Missing: everyone may do everything. `task.py init` writes a template.",
+      "default": ".claude/tasks/roles.toml"
+    },
+    "labels": {
+      "type": "string",
+      "title": "Label vocabulary",
+      "description": "Comma-separated labels a task may carry. Empty: any label.",
+      "default": "bug,feature,chore,docs,test,blocked-external"
+    },
+    "importers": {
+      "type": "string",
+      "title": "Importers",
+      "description": "Comma-separated sources `task.py import` reads: a .py file or module defining records(ctx), or a command printing JSON records. None by default.",
+      "default": ""
+    },
+    "notifyCommand": {
+      "type": "string",
+      "title": "Notify command",
+      "description": "Optional command run for each notification (besides the tracker inbox), with {to} {sender} {key} {prio} {text} filled in. Runs without a shell.",
+      "default": ""
+    },
+    "refreshSeconds": {
+      "type": "number",
+      "title": "Refresh interval (seconds)",
+      "description": "How often the status line, band and pane check the tracker for changes. 0 turns live updates off.",
+      "default": 3
+    }
+  }
+}

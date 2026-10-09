@@ -1,0 +1,41 @@
+{
+  "name": "code-index",
+  "version": "0.1.0",
+  "description": "A compact symbol index, markdown section maps and task tags, so Claude reads the index and a few lines instead of whole files.",
+  "author": {
+    "name": "Azoof Ahmed"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "indexPath": {
+      "type": "string",
+      "title": "Index path",
+      "description": "Where /index writes the index, relative to the project root. A .json path writes JSON; anything else writes markdown.",
+      "default": ".claude/index/code_index.md"
+    },
+    "include": {
+      "type": "string",
+      "title": "Files to index",
+      "description": "Comma-separated globs (**, *, ?, {a,b}). A glob with no slash matches at any depth.",
+      "default": "**/*.{py,pyi,ts,tsx,mts,cts,js,jsx,mjs,cjs,c,h,cc,cpp,cxx,hpp,hh,hxx,inl,cs,go,rs,java,kt,kts,md}"
+    },
+    "exclude": {
+      "type": "string",
+      "title": "Files to skip",
+      "description": "Comma-separated globs never indexed. In a git repository, .gitignore is honoured as well.",
+      "default": "**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**,**/target/**,**/bin/**,**/obj/**,**/vendor/**,**/third_party/**,**/.venv/**,**/venv/**,**/__pycache__/**,**/.next/**,**/coverage/**,**/.claude/**,**/*.min.js"
+    },
+    "statusTag": {
+      "type": "string",
+      "title": "Task tag name",
+      "description": "The comment tag that marks where a task stands, as in // STATUS(<task>): OPEN -- what is left.",
+      "default": "STATUS"
+    },
+    "python": {
+      "type": "string",
+      "title": "Python",
+      "description": "The Python 3.9+ executable that runs the scripts (python, python3, py, or a full path).",
+      "default": "python"
+    }
+  }
+}

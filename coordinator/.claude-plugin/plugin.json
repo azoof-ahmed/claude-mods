@@ -1,0 +1,121 @@
+{
+  "name": "coordinator",
+  "version": "0.1.0",
+  "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports and token-economy reminders.",
+  "author": {
+    "name": "Azoof Ahmed"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "repos": {
+      "type": "string",
+      "title": "Repositories",
+      "description": "Comma-separated repo paths workers start in (relative to the project root). The first is the default for spawn.",
+      "default": "."
+    },
+    "backend": {
+      "type": "string",
+      "title": "Worker terminal backend",
+      "description": "Where a worker starts: orca (Orca terminal tabs), tmux (windows of the current or a `coord` session), wt (Windows Terminal tabs), or manual (print the command to run).",
+      "default": "manual",
+      "options": ["manual", "orca", "tmux", "wt"]
+    },
+    "shell": {
+      "type": "string",
+      "title": "Worker shell",
+      "description": "How the worker's AGENT_BUS_ROLE is set before its command: auto (PowerShell on Windows, POSIX elsewhere), posix, powershell or cmd.",
+      "default": "auto",
+      "options": ["auto", "posix", "powershell", "cmd"]
+    },
+    "workerCommand": {
+      "type": "string",
+      "title": "Worker command template",
+      "description": "The command that starts a worker. Placeholders: {model}, {prompt}, {role}, {brief}, {repo}. Add flags such as a permission mode here.",
+      "default": "claude --model {model} \"{prompt}\""
+    },
+    "workerPrompt": {
+      "type": "string",
+      "title": "Worker prompt template",
+      "description": "The first prompt a worker gets. Placeholders: {role}, {brief}, {model}, {repo}.",
+      "default": "Read {brief} and execute it. Your role is {role}."
+    },
+    "workerModel": {
+      "type": "string",
+      "title": "Worker model",
+      "description": "The model a worker runs on ({model} in the command template).",
+      "default": "opus"
+    },
+    "maxLanes": {
+      "type": "number",
+      "title": "Max concurrent lanes",
+      "description": "spawn refuses a new worker while this many lanes are live.",
+      "default": 6
+    },
+    "retireTokens": {
+      "type": "number",
+      "title": "Retire at (context tokens)",
+      "description": "A worker past this many context tokens is reminded to update its lane card and retire.",
+      "default": 250000
+    },
+    "pauseAtPercent": {
+      "type": "number",
+      "title": "Pause at usage limit (%)",
+      "description": "When a rate-limit window reaches this percentage, sessions are told to checkpoint and pause.",
+      "default": 97
+    },
+    "busDir": {
+      "type": "string",
+      "title": "Bus directory",
+      "description": "The agent-bus directory (used when the agent-bus plugin is installed).",
+      "default": ".claude/bus"
+    },
+    "trackerDb": {
+      "type": "string",
+      "title": "Task tracker database",
+      "description": "The task-tracker SQLite db; lanes show their in-progress tasks from it when it exists.",
+      "default": ".claude/tasks/tasks.db"
+    },
+    "rulesFile": {
+      "type": "string",
+      "title": "Rules file",
+      "description": "The short rules-core file every worker reads first.",
+      "default": ".claude/coord/RULES_CORE.md"
+    },
+    "briefsDir": {
+      "type": "string",
+      "title": "Briefs directory",
+      "description": "Where briefs, the resume brief, the scheduler brief and the handoff protocol live.",
+      "default": ".claude/coord/briefs"
+    },
+    "cardsDir": {
+      "type": "string",
+      "title": "Lane cards directory",
+      "description": "Where lane cards (one per role, the handoff) and lanes.json live.",
+      "default": ".claude/coord/lanes"
+    },
+    "reportsDir": {
+      "type": "string",
+      "title": "Reports directory",
+      "description": "Progress logs, the question queue, and the fallback for messages without the bus.",
+      "default": ".claude/coord/reports"
+    },
+    "minFreeRamGb": {
+      "type": "number",
+      "title": "Preflight: min free RAM (GB)",
+      "description": "preflight answers WAIT below this much free memory.",
+      "default": 4
+    },
+    "minBattery": {
+      "type": "number",
+      "title": "Preflight: min battery (%)",
+      "description": "preflight answers WAIT below this battery level when not charging.",
+      "default": 40
+    },
+    "python": {
+      "type": "string",
+      "title": "Python",
+      "description": "The Python interpreter that runs the coordinator CLI (3.9 or newer).",
+      "default": "python"
+    }
+  }
+}

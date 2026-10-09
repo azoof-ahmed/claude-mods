@@ -1,0 +1,44 @@
+# Example guardrails rules. Copy to <project>/.claude/guardrails.toml and edit.
+# Then record what already exists:  python <plugin>/scripts/guard.py baseline
+# From then on, only NEW violations fail (the edit gate denies them; `guard.py check` exits 1).
+
+# What a full `guard.py check` walks (node_modules, .git, build outputs and the like are always skipped).
+[scan]
+include = ["**"]
+exclude = ["**/fixtures/**"]
+
+[[rules]]
+id = "no-todo-in-src"
+pattern = '\b(TODO|FIXME|XXX|HACK)\b'
+message = "Unfinished-work marker in shipped code. Finish it, or track it in the issue tracker."
+paths = ["src/**"]
+exclude = ["**/*.test.*", "**/*.spec.*"]
+
+[[rules]]
+id = "no-console-log"
+pattern = 'console\.(log|debug)\('
+message = "console.log in src. Use the project's logger."
+paths = ["src/**/*.{js,jsx,ts,tsx,mjs,cjs}"]
+exclude = ["**/*.test.*"]
+
+[[rules]]
+id = "no-hardcoded-secret"
+pattern = '''(?i)\b(api[_-]?key|secret|password|passwd|token)\b\s*[:=]\s*["'][^"'\s]{8,}["']|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'''
+message = "Looks like a hardcoded secret. Read it from the environment or a secret store."
+paths = ["**"]
+exclude = ["**/*.md", "**/*.lock", ".claude/guardrails.*"]
+
+[[rules]]
+id = "no-debugger"
+pattern = '^\s*(debugger;|breakpoint\(\)|import pdb|pdb\.set_trace\(\))'
+message = "Debugger statement left in."
+severity = "warn"
+
+# A command rule runs a project script with the file paths appended. The script prints one violation per
+# line as `path:line: rule: message` (the format of most linters) and exits 0 or 1. During an edit check the
+# script gets a temporary copy of the edited file; GUARDRAILS_ORIGINAL_PATH names the real one.
+# [[rules]]
+# id = "flake8"
+# type = "command"
+# command = ["python", "-m", "flake8", "--format=%(path)s:%(row)d: %(code)s: %(text)s"]
+# paths = ["**/*.py"]

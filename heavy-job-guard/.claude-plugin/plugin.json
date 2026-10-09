@@ -1,0 +1,43 @@
+{
+  "name": "heavy-job-guard",
+  "version": "0.2.0",
+  "description": "Stops Claude from starting a heavy job (typecheck, tests, builds) while another one is already running on the machine.",
+  "author": {
+    "name": "Azoof Ahmed"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "pattern": {
+      "type": "string",
+      "title": "Heavy job pattern",
+      "description": "Regular expression matched against Bash commands and running process command lines. A match is a heavy job.",
+      "default": "\\b(tsc|vitest|jest|playwright|oxlint|eslint|xcodebuild|gradlew)\\b|\\b(bun|npm|pnpm|yarn)( run)? (typecheck|test|build|lint|check)\\b|\\bturbo (run )?(typecheck|test|build|lint)\\b|\\bcargo (build|test|check)\\b"
+    },
+    "ignore": {
+      "type": "string",
+      "title": "Ignore pattern",
+      "description": "Regular expression for running processes that match the heavy pattern but never finish on their own (editor language servers, watch modes). They never block a job.",
+      "default": "--lsp\\b|--watch\\b|\\bwatch\\b|language-?server|tsserver"
+    },
+    "mode": {
+      "type": "string",
+      "title": "When a heavy job is already running",
+      "description": "block refuses the new command and tells Claude to wait; warn lets it run and shows a toast.",
+      "default": "block",
+      "options": [
+        "block",
+        "warn"
+      ]
+    },
+    "subagents": {
+      "type": "string",
+      "title": "Heavy jobs from subagents",
+      "description": "allow treats subagents like the main agent; deny refuses every heavy job a subagent starts, so only the main agent runs them.",
+      "default": "allow",
+      "options": [
+        "allow",
+        "deny"
+      ]
+    }
+  }
+}
