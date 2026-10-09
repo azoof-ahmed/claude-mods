@@ -26,6 +26,16 @@ description: Work as one lane of a coordinated multi-agent project. Use when you
 - **The shared tree:** never revert, reset, stash or reformat files you did not create. Undo your own changes by editing your hunks back.
 - **When idle:** arm the bus watch Monitor if the context asks. Do not poll.
 
+## Pausing
+When the coordinator sends PAUSE (a usage limit):
+1. Finish or park your atomic step.
+2. Update your card.
+3. Release any scheduler slot.
+4. Run `coord paused`.
+5. End with `SAFE TO CLOSE`.
+
+A short overrun to finish cleanly is fine. Start nothing new. `coord resume` restarts your lane from the card.
+
 ## Retiring
 When the plugin says you are past the token threshold, or the coordinator sends `retire`:
 1. Finish or park the current step.

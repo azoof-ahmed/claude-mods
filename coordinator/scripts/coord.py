@@ -13,6 +13,11 @@
     python coord.py answer <qid> "<answer>"             answer a question; the asker gets it on the bus
     python coord.py preflight [--min-ram-gb N] [--min-battery P] [--max-user-idle-s S]
                                                         GO (exit 0) or WAIT (exit 1) for a heavy job, with reasons
+    python coord.py usage [--probe] [--json]           the latest usage reading (session and weekly %)
+    python coord.py usage-watch [--start] [--once]      probe usage on a schedule; alert the coordinator at the thresholds
+    python coord.py pause [--tick] [--wait] [--now]     graceful pause: every lane checkpoints its card and stops
+    python coord.py paused [--role R]                   (a worker) report that this lane has checkpointed and stops
+    python coord.py resume [--dry-run]                  respawn the paused lanes from their cards
     python coord.py config                              the resolved configuration
 
 Configuration (first match wins): flags > <project>/.claude/claude-mods.json "coordinator" > environment
@@ -42,7 +47,12 @@ DEFAULTS = {
     'workerModel': 'opus',
     'maxLanes': 6,
     'retireTokens': 250000,
-    'pauseAtPercent': 97,
+    'pauseSessionPercent': 97,        # 5-hour window: every session checkpoints and pauses itself
+    'pauseWeeklyPercent': 80,         # weekly window: the coordinator runs the graceful pause
+    'probeIntervals': '0:60,70:20,78:10',  # weekly %:minutes between usage probes
+    'probeCommand': 'claude --model haiku',
+    'pauseReminderMin': 10,           # minutes before a silent lane gets one reminder
+    'pauseGraceMin': 20,              # minutes before a silent lane is interrupted and closed
     'busDir': '.claude/bus',
     'trackerDb': '.claude/tasks/tasks.db',
     'rulesFile': '.claude/coord/RULES_CORE.md',
@@ -52,7 +62,8 @@ DEFAULTS = {
     'minFreeRamGb': 4,
     'minBattery': 40,
 }
-INTS = ('maxLanes', 'retireTokens', 'pauseAtPercent', 'minBattery')
+INTS = ('maxLanes', 'retireTokens', 'pauseSessionPercent', 'pauseWeeklyPercent', 'minBattery')
+FLOATS_EXTRA = ('pauseReminderMin', 'pauseGraceMin')
 FLOATS = ('minFreeRamGb',)
 PATHS = ('busDir', 'trackerDb', 'rulesFile', 'briefsDir', 'cardsDir', 'reportsDir')
 
@@ -88,7 +99,7 @@ class Config(dict):
                 self[k] = v
         for k in INTS:
             self[k] = int(self[k])
-        for k in FLOATS:
+        for k in FLOATS + FLOATS_EXTRA:
             self[k] = float(self[k])
         if self['backend'] not in ('orca', 'tmux', 'wt', 'manual'):
             raise SystemExit(f"coordinator: backend must be orca, tmux, wt or manual, not {self['backend']!r}")
@@ -290,7 +301,8 @@ def render(text, cfg, role='<role>'):
     vals = {
         'role': role, 'rules': rel(cfg, cfg.path('rulesFile')), 'cards': rel(cfg, cfg.path('cardsDir')),
         'briefs': rel(cfg, cfg.path('briefsDir')), 'reports': rel(cfg, cfg.path('reportsDir')),
-        'retire_tokens': f"{cfg['retireTokens'] // 1000}k", 'pause_percent': cfg['pauseAtPercent'],
+        'retire_tokens': f"{cfg['retireTokens'] // 1000}k", 'pause_percent': cfg['pauseSessionPercent'],
+        'pause_weekly': cfg['pauseWeeklyPercent'],
         'coord': 'coord',  # the session context names the real command; plugin paths change between versions
     }
     for k, v in vals.items():
@@ -411,7 +423,7 @@ def cmd_respawn(cfg, args):
     role = pos[0]
     lanes = load_lanes(cfg)
     lane = lanes.get(role)
-    if lane and lane.get('state') != 'closed':
+    if lane and lane.get('state') not in ('closed', 'paused'):
         close_terminal(cfg, lane, dry)
         if not dry:
             lane['state'] = 'closed'
@@ -660,6 +672,363 @@ def cmd_preflight(cfg, args):
     return 1 if reasons else 0
 
 
+
+# ---- usage: readings, the probe, the watcher
+
+USAGE_RE = {
+    'session': re.compile(r'current session[^\n]*?(?:\n[^\n%]*?)?(\d{1,3})\s*%\s*used', re.I),
+    'week': re.compile(r'current week \(all models\)[^\n]*?(?:\n[^\n%]*?)?(\d{1,3})\s*%\s*used', re.I),
+}
+
+
+def parse_usage(text):
+    """{'session': int|None, 'week': int|None} from the text of Claude Code's /usage screen."""
+    out = {}
+    for k, rx in USAGE_RE.items():
+        m = rx.search(text or '')
+        out[k] = int(m.group(1)) if m else None
+    return out
+
+
+def usage_file(cfg):
+    return cfg.path('reportsDir') / 'usage.json'
+
+
+def read_usage(cfg):
+    try:
+        return json.loads(usage_file(cfg).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def write_usage(cfg, reading, source):
+    rec = {'session': reading.get('session'), 'week': reading.get('week'), 'source': source, 'time': time.time(),
+           'at': now()}
+    p = usage_file(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(rec), encoding='utf-8')
+    with open(cfg.path('reportsDir') / 'usage_history.log', 'a', encoding='utf-8') as f:
+        f.write(f"{rec['at']} week={rec['week']}% session={rec['session']}% ({source})\n")
+    return rec
+
+
+def probe_interval_min(cfg, week):
+    """Minutes until the next probe: the step of `probeIntervals` (pct:min,...) that the weekly % has reached."""
+    steps = []
+    for part in str(cfg['probeIntervals']).split(','):
+        if ':' in part:
+            a, b = part.split(':', 1)
+            steps.append((float(a), float(b)))
+    steps.sort()
+    mins = steps[0][1] if steps else 60.0
+    for pct, m in steps:
+        if week is not None and week >= pct:
+            mins = m
+    return mins
+
+
+def probe_usage(cfg, dry=False):
+    """Read /usage from a throwaway Claude Code session in a terminal the backend can read back (orca, tmux).
+
+    The session runs `probeCommand` (a cheap model), gets `/usage` typed, has its screen read, and is closed.
+    No task work happens in it. Returns {'session','week'} or raises SystemExit when the backend cannot read a screen.
+    """
+    b = cfg['backend']
+    repo = cfg.repos()[0]
+    if b == 'orca':
+        r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', 'usage-probe', '--json'], dry)
+        try:
+            res = json.loads(r.stdout or '{}')
+            h = (res.get('result') or {}).get('handle') or res.get('handle')
+        except ValueError:
+            h = None
+        if dry:
+            return {'session': None, 'week': None}
+        if not h:
+            raise SystemExit('coordinator: usage probe: orca could not open a terminal')
+        try:
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', cfg['probeCommand'], '--enter'], dry)
+            time.sleep(20)
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '/usage', '--enter'], dry)
+            time.sleep(12)
+            screen = run(['orca', 'terminal', 'read', '--terminal', h, '--screen'], dry).stdout
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '\x1b'], dry)
+            run(['orca', 'terminal', 'send', '--terminal', h, '--text', '/exit', '--enter'], dry)
+            time.sleep(4)
+        finally:
+            run(['orca', 'terminal', 'close', '--terminal', h, '--tab'], dry)
+        return parse_usage(screen)
+    if b == 'tmux':
+        target = [] if os.environ.get('TMUX') else ['-t', 'coord']
+        if target and run(['tmux', 'has-session', '-t', 'coord'], dry).returncode != 0:
+            run(['tmux', 'new-session', '-d', '-s', 'coord', '-n', 'coord'], dry)
+        r = run(['tmux', 'new-window', '-d', *target, '-P', '-F', '#{window_id}', '-n', 'usage-probe', '-c', repo,
+                 cfg['probeCommand']], dry)
+        w = (r.stdout or '').strip()
+        if dry:
+            return {'session': None, 'week': None}
+        try:
+            time.sleep(20)
+            run(['tmux', 'send-keys', '-t', w, '/usage', 'Enter'], dry)
+            time.sleep(12)
+            screen = run(['tmux', 'capture-pane', '-p', '-t', w], dry).stdout
+        finally:
+            run(['tmux', 'kill-window', '-t', w], dry)
+        return parse_usage(screen)
+    raise SystemExit(f"coordinator: the {b} backend cannot read a terminal back, so it cannot probe /usage. The plugin "
+                     'still records the coordinator session\'s own usage readings; run `usage` to see the latest.')
+
+
+def alert_coordinator(cfg, text):
+    """Urgent to the coordinator: over the bus when there is one, else into the alerts file the plugin shows."""
+    r = bus(cfg, 'send', 'coordinator', text, '--prio', 'urgent', '--topic', 'usage', '--from', 'usage-watch')
+    p = cfg.path('reportsDir') / 'alerts.jsonl'
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, 'a', encoding='utf-8') as f:
+        f.write(json.dumps({'at': now(), 'time': time.time(), 'text': text, 'bus': r is not None and r.returncode == 0})
+                + '\n')
+    print(text)
+
+
+def usage_alerts(cfg, rec, state):
+    """Alert once per crossing of each threshold; `state` remembers what was alerted. Returns the texts sent."""
+    sent = []
+    wk, ss = rec.get('week'), rec.get('session')
+    if wk is not None and wk >= cfg['pauseWeeklyPercent'] and not state.get('week'):
+        t = (f"usage-watch: WEEKLY usage {wk}% >= {cfg['pauseWeeklyPercent']}%: start the graceful pause "
+             '(`coord pause`; every lane checkpoints its card and stops, nothing is lost).')
+        alert_coordinator(cfg, t)
+        sent.append(t)
+        state['week'] = True
+    if wk is not None and wk < cfg['pauseWeeklyPercent']:
+        state['week'] = False
+    if ss is not None and ss >= cfg['pauseSessionPercent'] and not state.get('session'):
+        t = f"usage-watch: 5-HOUR session usage {ss}% >= {cfg['pauseSessionPercent']}%: pause now (`coord pause`)."
+        alert_coordinator(cfg, t)
+        sent.append(t)
+        state['session'] = True
+    if ss is not None and ss < cfg['pauseSessionPercent']:
+        state['session'] = False
+    return sent
+
+
+def cmd_usage(cfg, args):
+    if '--probe' in args:
+        rec = write_usage(cfg, probe_usage(cfg, '--dry-run' in args), 'probe:' + cfg['backend'])
+    else:
+        rec = read_usage(cfg)
+    if '--json' in args:
+        print(json.dumps(rec))
+        return 0
+    if not rec:
+        print('no usage reading yet: the plugin records the coordinator session\'s readings; `usage --probe` reads '
+              '/usage through the backend (orca, tmux)')
+        return 1
+    age = int((time.time() - rec.get('time', 0)) / 60)
+    print(f"week {rec.get('week')}% (pause at {cfg['pauseWeeklyPercent']}%), session {rec.get('session')}% "
+          f"(pause at {cfg['pauseSessionPercent']}%), {age} min old, from {rec.get('source')}")
+    return 0
+
+
+def cmd_record_usage(cfg, args):
+    """record-usage [--week N] [--session N] [--source S]: a reading the plugin took from its own session."""
+    wk, ss = take(args, '--week'), take(args, '--session')
+    rec = write_usage(cfg, {'week': int(float(wk)) if wk else None, 'session': int(float(ss)) if ss else None},
+                      take(args, '--source') or 'session')
+    state_p = cfg.path('reportsDir') / 'usage_alerted.json'
+    try:
+        state = json.loads(state_p.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        state = {}
+    if '--alert' in args:
+        usage_alerts(cfg, rec, state)
+        state_p.write_text(json.dumps(state), encoding='utf-8')
+    return 0
+
+
+def cmd_usage_watch(cfg, args):
+    """Probe on a schedule and alert at the thresholds. A reading the plugin recorded recently counts as a probe."""
+    if '--start' in args:
+        cmd = f'python "{Path(__file__).resolve().as_posix()}" usage-watch'
+        handle, how = open_terminal(cfg, 'usage-watch', cfg.repos()[0], cmd, '--dry-run' in args)
+        print(f'usage-watch: started ({how}{" " + handle if handle else ""})')
+        return 0
+    state = {}
+    while True:
+        last = read_usage(cfg)
+        wk = last.get('week')
+        fresh = last and time.time() - last.get('time', 0) < probe_interval_min(cfg, wk) * 60
+        try:
+            rec = last if fresh else write_usage(cfg, probe_usage(cfg), 'probe:' + cfg['backend'])
+        except SystemExit as ex:
+            print(f'{now()} {ex}')
+            rec = last
+        if rec:
+            print(f"{now()} week={rec.get('week')}% session={rec.get('session')}%", flush=True)
+            usage_alerts(cfg, rec, state)
+        if '--once' in args:
+            return 0
+        time.sleep(probe_interval_min(cfg, (rec or {}).get('week')) * 60)
+
+
+# ---- the graceful pause
+
+def pause_file(cfg):
+    return cfg.path('cardsDir') / 'pause.json'
+
+
+def load_pause(cfg):
+    try:
+        return json.loads(pause_file(cfg).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+
+
+def save_pause(cfg, st):
+    p = pause_file(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix('.tmp')
+    tmp.write_text(json.dumps(st, indent=1, sort_keys=True), encoding='utf-8')
+    os.replace(tmp, p)
+
+
+def clock():
+    return time.time()
+
+
+PAUSE_TEXT = ('PAUSE (usage limit): finish your current atomic step (or park it so nothing is half-done), update your '
+              'lane card {card} (state, next 3 actions, anchors, open messages), release any scheduler slot, then run '
+              '`coord paused` and end with SAFE TO CLOSE. Do not start anything new. Going a little over the limit '
+              'to finish cleanly is fine.')
+
+
+def tell(cfg, role, text, prio='urgent'):
+    r = bus(cfg, 'send', role, text, '--prio', prio, '--topic', 'pause', '--from', 'coordinator')
+    if r is None or r.returncode != 0:
+        print(f'(no bus) tell {role}: {text}')
+
+
+def interrupt(cfg, lane, dry=False):
+    """Stop a lane that did not answer: an Escape to the agent first (orca, tmux), then close its terminal."""
+    h, how = lane.get('handle'), lane.get('backend')
+    if how == 'orca' and h:
+        run(['orca', 'terminal', 'send', '--terminal', h, '--text', '\x1b'], dry)
+    elif how == 'tmux' and h:
+        run(['tmux', 'send-keys', '-t', h, 'Escape'], dry)
+    return close_terminal(cfg, lane, dry)
+
+
+def write_resume_list(cfg, st):
+    lines = [f"# Resume list (paused {st.get('started_at')}, finished {now()})", '',
+             'Run `coord resume` to respawn these lanes from their cards.', '']
+    for role, l in sorted(st['lanes'].items()):
+        lines.append(f"- {role}: {l['state']} -- card {rel(cfg, cfg.path('cardsDir') / f'{role}.md')}")
+    p = cfg.path('reportsDir') / 'RESUME_LIST.md'
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return p
+
+
+def pause_tick(cfg, st, dry=False):
+    """One pass: close lanes that checkpointed, remind once, interrupt past the grace. True when all are done."""
+    lanes = load_lanes(cfg)
+    t = clock()
+    for role, pl in st['lanes'].items():
+        if pl['state'] in ('paused', 'interrupted'):
+            continue
+        lane = lanes.get(role, {'role': role})
+        if pl['state'] == 'checkpointed' or last_word(cfg, role) == 'safe':
+            close_terminal(cfg, lane, dry)
+            pl['state'], pl['closed_at'] = 'paused', now()
+        elif t - pl['asked'] >= cfg['pauseGraceMin'] * 60:
+            interrupt(cfg, lane, dry)
+            pl['state'], pl['closed_at'] = 'interrupted', now()
+        elif t - pl['asked'] >= cfg['pauseReminderMin'] * 60 and not pl.get('reminded'):
+            tell(cfg, role, 'REMINDER: ' + PAUSE_TEXT.format(card=rel(cfg, cfg.path('cardsDir') / f'{role}.md'))
+                 + f" You will be interrupted in {int(cfg['pauseGraceMin'] - cfg['pauseReminderMin'])} min.")
+            pl['reminded'] = now()
+        if pl['state'] in ('paused', 'interrupted') and role in lanes:
+            lanes[role]['state'] = 'paused'
+    if not dry:
+        save_lanes(cfg, lanes)
+    done = all(pl['state'] in ('paused', 'interrupted') for pl in st['lanes'].values())
+    if done and st.get('state') != 'complete':
+        st['state'] = 'complete'
+        st['finished_at'] = now()
+        st['resume_list'] = rel(cfg, write_resume_list(cfg, st))
+    return done
+
+
+def cmd_pause(cfg, args):
+    dry = '--dry-run' in args
+    st = load_pause(cfg)
+    if not ('--tick' in args or '--wait' in args) or st is None or st.get('state') == 'complete':
+        if st and st.get('state') == 'pausing' and '--now' not in args:
+            print('a pause is already running; `pause --tick` advances it')
+        else:
+            lanes = load_lanes(cfg)
+            live = sorted(r for r, l in lanes.items() if l.get('state') in ('live', 'retiring')
+                          and r not in ('usage-watch',))
+            st = {'state': 'pausing', 'started_at': now(), 'started': clock(),
+                  'lanes': {r: {'state': 'asked', 'asked': clock()} for r in live}}
+            for r in live:
+                tell(cfg, r, PAUSE_TEXT.format(card=rel(cfg, cfg.path('cardsDir') / f'{r}.md')))
+            print(f"pause: asked {len(live)} lane(s) to checkpoint: {', '.join(live) or 'none'}. Reminder after "
+                  f"{cfg['pauseReminderMin']:g} min, interrupt after {cfg['pauseGraceMin']:g} min.")
+    while True:
+        done = pause_tick(cfg, st, dry)
+        if not dry:
+            save_pause(cfg, st)
+        counts = {}
+        for pl in st['lanes'].values():
+            counts[pl['state']] = counts.get(pl['state'], 0) + 1
+        print('pause: ' + (', '.join(f'{v} {k}' for k, v in sorted(counts.items())) or 'no lanes')
+              + (f" -- complete; resume list {st.get('resume_list')}" if done else ''), flush=True)
+        if done or '--wait' not in args:
+            return 0
+        time.sleep(30)
+
+
+def cmd_paused(cfg, args):
+    role = take(args, '--role') or os.environ.get('AGENT_BUS_ROLE')
+    if not role:
+        raise SystemExit('coordinator: paused: who are you? pass --role or set AGENT_BUS_ROLE')
+    st = load_pause(cfg)
+    if not st or role not in st.get('lanes', {}):
+        print(f'{role}: no pause is running for this lane; nothing recorded')
+        return 1
+    st['lanes'][role].update({'state': 'checkpointed', 'checkpointed_at': now()})
+    save_pause(cfg, st)
+    bus(cfg, 'send', 'coordinator', f'{role} paused: card updated, stopping.', '--prio', 'fyi', '--topic', 'pause',
+        '--from', role)
+    print(f'{role}: checkpointed. End your turn with SAFE TO CLOSE; the coordinator closes this terminal.')
+    return 0
+
+
+def cmd_resume(cfg, args):
+    dry = '--dry-run' in args
+    st = load_pause(cfg)
+    if not st:
+        print('nothing to resume: no pause on record')
+        return 1
+    if st.get('state') == 'pausing':
+        print('the pause is still running (`pause --tick`); resuming anyway respawns the lanes already stopped')
+    started = []
+    for role, pl in sorted(st['lanes'].items()):
+        if pl['state'] not in ('paused', 'interrupted'):
+            continue
+        code = cmd_respawn(cfg, [role] + (['--dry-run'] if dry else []))
+        if code == 0:
+            started.append(role)
+            pl['state'] = 'resumed'
+    if not dry:
+        st['state'] = 'resumed' if all(pl['state'] in ('resumed',) for pl in st['lanes'].values()) else st['state']
+        st['resumed_at'] = now()
+        save_pause(cfg, st)
+    print(f"resume: {', '.join(started) or 'nothing'}")
+    return 0
+
+
 def take(args, flag):
     if flag in args:
         i = args.index(flag)
@@ -686,7 +1055,9 @@ def cmd_context(cfg, args):
         'live': sorted(r for r, l in lanes.items() if l.get('state') in ('live', 'retiring')),
         'questions': sum(1 for q in load_questions(cfg).values() if not q.get('answer')) if configured else 0,
         'retireTokens': cfg['retireTokens'],
-        'pauseAtPercent': cfg['pauseAtPercent'],
+        'pauseSessionPercent': cfg['pauseSessionPercent'],
+        'pauseWeeklyPercent': cfg['pauseWeeklyPercent'],
+        'pause': (load_pause(cfg) or {}).get('state') if configured else None,
         'maxLanes': cfg['maxLanes'],
     }
     print(json.dumps(out))
@@ -697,7 +1068,8 @@ VERBS = {
     'context': cmd_context,
     'init': cmd_init, 'spawn': cmd_spawn, 'retire': cmd_retire, 'respawn': cmd_respawn, 'lanes': cmd_lanes,
     'status': cmd_status, 'close-idle': cmd_close_idle, 'ask': cmd_ask, 'questions': cmd_questions,
-    'answer': cmd_answer, 'preflight': cmd_preflight,
+    'answer': cmd_answer, 'preflight': cmd_preflight, 'usage': cmd_usage, 'usage-watch': cmd_usage_watch,
+    'pause': cmd_pause, 'paused': cmd_paused, 'resume': cmd_resume, 'record-usage': cmd_record_usage,
 }
 
 

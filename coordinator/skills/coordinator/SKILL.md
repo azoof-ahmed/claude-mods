@@ -84,4 +84,7 @@ You coordinate; workers do the work. Your context is the scarcest thing in the s
 - **Your own retirement:** retire like any lane when the plugin says so.
   1. Write your own card: lanes, open questions, decisions pending, next actions.
   2. Hand over to a successor coordinator.
-- **Usage limits:** at the pause percentage, every lane checkpoints its card and pauses. You stop last.
+- **Usage limits:**
+  - At the weekly pause percentage (default 80%), run `/coordinator pause`. Lanes checkpoint their cards and stop, a resume list is written, and `/coordinator resume` brings them back from their cards. You stop last.
+  - Keep `coord usage-watch --start` running so an idle coordinator is alerted too.
+  - At the session percentage, every session checkpoints itself.

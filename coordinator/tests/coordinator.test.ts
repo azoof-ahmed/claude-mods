@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { contextLines, retireReminder, type CoordContext } from '../hooks/register'
+import { contextLines, retireReminder, usageNotes, type CoordContext } from '../hooks/register'
 
 const BASE: CoordContext = {
   configured: true,
@@ -12,7 +12,9 @@ const BASE: CoordContext = {
   live: ['worker-a', 'worker-b'],
   questions: 0,
   retireTokens: 250000,
-  pauseAtPercent: 97,
+  pauseSessionPercent: 97,
+  pauseWeeklyPercent: 80,
+  pause: null,
   maxLanes: 6,
 }
 
@@ -54,4 +56,30 @@ test('retirement reminders start at the threshold and repeat every further 10%',
   expect(first?.level).toBe(1)
   expect(retireReminder(260000, 250000, 1)).toBeUndefined()
   expect(retireReminder(276000, 250000, 1)?.level).toBe(2)
+})
+
+test('weekly usage past the threshold tells the coordinator to pause, once per crossing', async () => {
+  const week = (p: number) => [{ kind: 'seven_day', percentUsed: p }]
+  let r = usageNotes(week(79), BASE, new Set())
+  expect(r.notes).toEqual([])
+  r = usageNotes(week(81), BASE, r.noted)
+  expect(r.notes[0]).toContain('/coordinator pause')
+  expect(usageNotes(week(83), BASE, r.noted).notes).toEqual([])
+  const reset = usageNotes(week(10), BASE, r.noted)
+  expect(usageNotes(week(85), BASE, reset.noted).notes.length).toBe(1)
+})
+
+test('workers are not told about the weekly threshold; the coordinator pauses them', async () => {
+  const r = usageNotes([{ kind: 'seven_day', percentUsed: 90 }], { ...BASE, isCoordinator: false }, new Set())
+  expect(r.notes).toEqual([])
+})
+
+test('no weekly note while a pause is already running', async () => {
+  const r = usageNotes([{ kind: 'seven_day', percentUsed: 90 }], { ...BASE, pause: 'pausing' }, new Set())
+  expect(r.notes).toEqual([])
+})
+
+test('everyone checkpoints at the session threshold', async () => {
+  const r = usageNotes([{ kind: 'five_hour', percentUsed: 98 }], { ...BASE, isCoordinator: false }, new Set())
+  expect(r.notes[0]).toContain('Checkpoint')
 })

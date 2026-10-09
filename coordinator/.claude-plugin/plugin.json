@@ -1,7 +1,7 @@
 {
   "name": "coordinator",
-  "version": "0.1.0",
-  "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports and token-economy reminders.",
+  "version": "0.2.0",
+  "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports, token-economy reminders, and a usage watcher with a graceful pause and resume.",
   "author": {
     "name": "Azoof Ahmed"
   },
@@ -18,14 +18,24 @@
       "title": "Worker terminal backend",
       "description": "Where a worker starts: orca (Orca terminal tabs), tmux (windows of the current or a `coord` session), wt (Windows Terminal tabs), or manual (print the command to run).",
       "default": "manual",
-      "options": ["manual", "orca", "tmux", "wt"]
+      "options": [
+        "manual",
+        "orca",
+        "tmux",
+        "wt"
+      ]
     },
     "shell": {
       "type": "string",
       "title": "Worker shell",
       "description": "How the worker's AGENT_BUS_ROLE is set before its command: auto (PowerShell on Windows, POSIX elsewhere), posix, powershell or cmd.",
       "default": "auto",
-      "options": ["auto", "posix", "powershell", "cmd"]
+      "options": [
+        "auto",
+        "posix",
+        "powershell",
+        "cmd"
+      ]
     },
     "workerCommand": {
       "type": "string",
@@ -57,11 +67,41 @@
       "description": "A worker past this many context tokens is reminded to update its lane card and retire.",
       "default": 250000
     },
-    "pauseAtPercent": {
+    "pauseWeeklyPercent": {
       "type": "number",
-      "title": "Pause at usage limit (%)",
-      "description": "When a rate-limit window reaches this percentage, sessions are told to checkpoint and pause.",
+      "title": "Graceful pause at weekly usage (%)",
+      "description": "When the weekly usage window reaches this, the coordinator is alerted to run the graceful pause (every lane checkpoints its card and stops). Going over it while lanes finish is fine.",
+      "default": 80
+    },
+    "pauseSessionPercent": {
+      "type": "number",
+      "title": "Pause at session usage (%)",
+      "description": "When the 5-hour session window reaches this, every session is told to checkpoint and pause.",
       "default": 97
+    },
+    "probeIntervals": {
+      "type": "string",
+      "title": "Usage probe schedule",
+      "description": "weeklyPercent:minutes steps for the usage watcher: the default probes every 60 min, every 20 from 70%, every 10 from 78%.",
+      "default": "0:60,70:20,78:10"
+    },
+    "probeCommand": {
+      "type": "string",
+      "title": "Usage probe command",
+      "description": "The throwaway Claude Code session the watcher opens to read /usage (orca and tmux backends). Use a cheap model.",
+      "default": "claude --model haiku"
+    },
+    "pauseReminderMin": {
+      "type": "number",
+      "title": "Pause: reminder after (minutes)",
+      "description": "A lane that has not checkpointed this long after the pause request gets one reminder.",
+      "default": 10
+    },
+    "pauseGraceMin": {
+      "type": "number",
+      "title": "Pause: interrupt after (minutes)",
+      "description": "A lane still silent this long after the pause request is interrupted and its terminal closed; its card is what it last wrote.",
+      "default": 20
     },
     "busDir": {
       "type": "string",

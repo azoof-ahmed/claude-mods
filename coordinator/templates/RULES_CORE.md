@@ -63,7 +63,9 @@ Every worker reads this file at startup. Keep it under 100 lines. Rules that no 
   - Update it at each milestone.
   - Update it again before you retire.
 - **Retiring:** retire at about {{retire_tokens}} tokens of context. Follow {{briefs}}/HANDOFF_PROTOCOL.md.
-- **Usage limits:** at {{pause_percent}}% of a usage limit, checkpoint your card and pause.
+- **Usage limits:**
+  - at {{pause_percent}}% of the session window, checkpoint your card and pause;
+  - at {{pause_weekly}}% of the weekly window, the coordinator sends PAUSE: finish your atomic step, update your card, run `coord paused`, and end with SAFE TO CLOSE. `coord resume` restarts you from the card.
 - **Long jobs (more than 2 minutes):** write a START line and an END line in {{reports}}/<role>_progress.md.
 - **Time-wasters:** note them in the card's Gotchas section, one line each.
 - **Final STATUS:** end it with `SAFE TO CLOSE`, or with `KEEP OPEN: <reason>`.

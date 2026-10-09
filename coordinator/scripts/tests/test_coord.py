@@ -156,6 +156,79 @@ class CoordTest(unittest.TestCase):
             code, out = self.run_cli('preflight')
         self.assertEqual(code, 0)
 
+    # ---- usage and the graceful pause
+
+    def test_parse_usage_screen(self):
+        screen = ("   Current session\n   \u2588\u2588\u2588\u258c          7% used\n   Resets 7:30am\n"
+                  "   Current week (all models)\n   \u2588\u2588\u2588       67% used\n   Resets Oct 13\n"
+                  "   Current week (Other)\n                0% used\n")
+        self.assertEqual(coord.parse_usage(screen), {'session': 7, 'week': 67})
+        self.assertEqual(coord.parse_usage('nothing here'), {'session': None, 'week': None})
+
+    def test_probe_schedule(self):
+        cfg = coord.Config(self.root)
+        self.assertEqual(coord.probe_interval_min(cfg, None), 60)
+        self.assertEqual(coord.probe_interval_min(cfg, 50), 60)
+        self.assertEqual(coord.probe_interval_min(cfg, 70), 20)
+        self.assertEqual(coord.probe_interval_min(cfg, 79), 10)
+
+    def test_record_usage_alerts_once_per_crossing(self):
+        self.run_cli('init')
+        _, out = self.run_cli('record-usage', '--week', '81', '--session', '10', '--alert')
+        self.assertIn('WEEKLY usage 81% >= 80%', out)
+        _, out = self.run_cli('record-usage', '--week', '82', '--alert')
+        self.assertNotIn('WEEKLY', out)
+        _, out = self.run_cli('usage')
+        self.assertIn('week 82%', out)
+        alerts = (self.root / '.claude/coord/reports/alerts.jsonl').read_text().splitlines()
+        self.assertEqual(len(alerts), 1)
+
+    def test_probe_refuses_backends_that_cannot_read_a_screen(self):
+        self.run_cli('init')
+        code, out = self.run_cli('usage', '--probe')
+        self.assertNotEqual(code, 0)
+        self.assertIn('cannot probe', out)
+
+    def test_probe_tmux_dry_run(self):
+        self.run_cli('init')
+        _, out = self.run_cli('usage', '--probe', '--dry-run', '--backend', 'tmux')
+        self.assertIn('claude --model haiku', out)
+
+    def test_graceful_pause_checkpoint_remind_interrupt_and_resume(self):
+        self.run_cli('init')
+        for r in ('fast', 'slow', 'silent'):
+            self.run_cli('spawn', r)
+        t0 = 1_000_000.0
+        with mock.patch.object(coord, 'clock', lambda: t0):
+            _, out = self.run_cli('pause')
+        self.assertIn('asked 3 lane(s)', out)
+        self.assertIn('(no bus) tell fast: PAUSE', out)
+        with mock.patch.dict(os.environ, {'AGENT_BUS_ROLE': 'fast'}):
+            code, _ = self.run_cli('paused')
+        self.assertEqual(code, 0)
+        (self.root / '.claude/coord/lanes/slow.md').write_text('## State\n- parked\n\nSAFE TO CLOSE\n')
+        with mock.patch.object(coord, 'clock', lambda: t0 + 11 * 60):
+            _, out = self.run_cli('pause', '--tick')
+        self.assertIn('REMINDER', out)
+        self.assertIn('2 paused', out)
+        self.assertIn('1 asked', out)
+        with mock.patch.object(coord, 'clock', lambda: t0 + 21 * 60):
+            _, out = self.run_cli('pause', '--tick')
+        self.assertIn('complete', out)
+        st = json.loads((self.root / '.claude/coord/lanes/pause.json').read_text())
+        self.assertEqual(st['lanes']['silent']['state'], 'interrupted')
+        self.assertTrue((self.root / '.claude/coord/reports/RESUME_LIST.md').exists())
+        lanes = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())
+        self.assertEqual({lanes[r]['state'] for r in ('fast', 'slow', 'silent')}, {'paused'})
+        _, out = self.run_cli('context')
+        self.assertEqual(json.loads(out)['pause'], 'complete')
+        _, out = self.run_cli('resume')
+        self.assertIn('resume: fast, silent, slow', out)
+        lanes = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())
+        self.assertEqual({lanes[r]['state'] for r in ('fast', 'slow', 'silent')}, {'live'})
+        self.assertEqual(lanes['fast']['generation'], 2)
+        self.assertEqual(lanes['fast']['brief'], '.claude/coord/briefs/RESUME.md')
+
 
 if __name__ == '__main__':
     unittest.main()

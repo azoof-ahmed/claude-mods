@@ -64,6 +64,11 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `questions [--all]` | Lists open questions (or all of them). |
 | `answer <qid> "<a>"` | Records the answer and sends it to the asker on the bus. |
 | `preflight [--min-ram-gb N] [--min-battery P] [--max-user-idle-s S]` | GO (exit 0) or WAIT (exit 1) for a heavy job, with the reasons. Works on Windows, Linux and macOS. |
+| `usage [--probe] [--json]` | The latest usage reading (session and weekly %). `--probe` reads `/usage` now (orca, tmux). |
+| `usage-watch [--start] [--once]` | Probes usage on the `probeIntervals` schedule and alerts the coordinator at the thresholds. `--start` runs it in its own terminal. |
+| `pause [--tick] [--wait]` | The graceful pause: asks every live lane to checkpoint and stop. `--tick` advances it; `--wait` runs it to the end. The plugin ticks it every minute. |
+| `paused` | A worker reports that it has checkpointed (uses `AGENT_BUS_ROLE`, or `--role`). |
+| `resume [--dry-run]` | Respawns every paused lane from its card on the resume brief. |
 | `config` | The resolved configuration. |
 
 ## Backends
@@ -96,7 +101,12 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
 | `workerModel` | `opus` | `{model}` in the template. `spawn --model` overrides it per lane. |
 | `maxLanes` | `6` | The number of concurrent live lanes. |
 | `retireTokens` | `250000` | Context tokens at which a worker is told to update its card and retire (again every further 10%). |
-| `pauseAtPercent` | `97` | Usage-limit percentage at which sessions are told to checkpoint and pause. |
+| `pauseWeeklyPercent` | `80` | Weekly usage at which the coordinator is alerted to run the graceful pause. |
+| `pauseSessionPercent` | `97` | 5-hour session usage at which every session is told to checkpoint and pause itself. |
+| `probeIntervals` | `0:60,70:20,78:10` | The watcher's schedule as weekly%:minutes steps: every 60 min, every 20 from 70%, every 10 from 78%. |
+| `probeCommand` | `claude --model haiku` | The throwaway session the watcher opens to read `/usage`. |
+| `pauseReminderMin` | `10` | Minutes before a silent lane gets one reminder. |
+| `pauseGraceMin` | `20` | Minutes before a silent lane is interrupted and its terminal closed. |
 | `busDir` | `.claude/bus` | The agent-bus directory. |
 | `trackerDb` | `.claude/tasks/tasks.db` | The task-tracker db, read-only, for lane tasks. |
 | `rulesFile` | `.claude/coord/RULES_CORE.md` | The rules core. |
@@ -116,8 +126,38 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
   Other projects get nothing.
 - **Every 10 tool calls**, the plugin reads the session's context size and usage windows:
   - past `retireTokens`, it adds a retirement reminder;
-  - at `pauseAtPercent` of a usage window, it adds a checkpoint-and-pause notice.
+  - in the coordinator session, at `pauseWeeklyPercent` of the weekly window, it adds a "start the graceful pause"
+    note and a toast, once per crossing;
+  - in every session, at `pauseSessionPercent` of the 5-hour window, it adds a checkpoint-and-pause notice.
 - **The status line** shows `coord: N/M lanes, Q question(s)` in the coordinator session.
+
+## Usage watcher and graceful pause
+
+The goal is to stop at about 80% of the weekly limit without losing work. Going a little over while lanes finish is fine.
+
+**Where the readings come from:**
+- **The coordinator session itself.** The plugin reads the usage windows that Claude Code reports with each response (`$.session.usage()`): the 5-hour session window and the weekly window. It writes them to `<reportsDir>/usage.json`, so they count as a probe. No extra session is needed while the coordinator is busy.
+- **The watcher**, for when the coordinator is idle: `coord usage-watch --start` runs it in its own terminal.
+  - It reuses a fresh reading when there is one.
+  - Otherwise it opens a throwaway session (`probeCommand`, a cheap model), types `/usage`, reads the screen and closes it.
+  - It probes every 60 minutes, every 20 minutes from 70% and every 10 minutes from 78% (`probeIntervals`).
+  - Screen reading needs the `orca` or `tmux` backend. With `wt` or `manual`, only the coordinator session's own readings are available.
+- **At the threshold**, the watcher sends the coordinator an urgent bus message, once per crossing. Without agent-bus it appends to `<reportsDir>/alerts.jsonl` and prints. In the coordinator session the plugin adds a note and a toast.
+
+**`/coordinator pause`:**
+1. Every live lane gets an urgent PAUSE. Each lane:
+   - finishes or parks its atomic step;
+   - updates its lane card;
+   - releases any scheduler slot;
+   - runs `coord paused`;
+   - ends with SAFE TO CLOSE.
+2. The plugin advances the pause every minute (or run `coord pause --wait`):
+   - lanes that checkpointed are closed;
+   - silent lanes get one reminder after `pauseReminderMin`;
+   - after `pauseGraceMin`, silent lanes get an Escape and are closed. Their card is what they last wrote.
+3. When every lane is done, it writes `<reportsDir>/RESUME_LIST.md`.
+
+**`/coordinator resume`** respawns every paused lane on the resume brief. Each successor reads its card and its waiting bus mail, and carries on.
 
 ## Without the companions
 - **No agent-bus:**

@@ -4,8 +4,11 @@
 - Retire at about {{retire_tokens}} tokens of context. Past that point, quality drops and every turn costs more.
   The coordinator plugin reminds you when you cross it.
 - Retire at once on a coordinator `retire` message.
-- At {{pause_percent}}% of a usage limit, checkpoint the same way and pause. Do not retire then: the successor would
+- At {{pause_percent}}% of the session window, checkpoint the same way and pause. Do not retire then: the successor would
   hit the same limit.
+- On a coordinator PAUSE (weekly usage at {{pause_weekly}}%), checkpoint the same way, run `coord paused`, and end with
+  SAFE TO CLOSE. A lane that stays silent gets one reminder, then is interrupted and closed. `coord resume` respawns
+  every paused lane from its card.
 
 ## Retiring (in this order)
 1. **Finish or park the current step.**

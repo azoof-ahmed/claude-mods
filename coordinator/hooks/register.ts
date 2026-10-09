@@ -11,7 +11,9 @@ export type CoordContext = {
   live: string[]
   questions: number
   retireTokens: number
-  pauseAtPercent: number
+  pauseSessionPercent: number
+  pauseWeeklyPercent: number
+  pause: string | null
   maxLanes: number
 }
 
@@ -26,6 +28,62 @@ function num(v: unknown, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback
 }
 
+/** A usage window as `$.session.usage()` reports it. */
+export type UsageWindow = { kind: string; percentUsed: number; resetsAt?: string }
+
+/** Which threshold a window is held to: the weekly one or the session (5-hour) one. */
+export function windowKind(kind: string): 'week' | 'session' | undefined {
+  if (/seven|week/i.test(kind)) {
+    return 'week'
+  }
+  if (/five|hour|session/i.test(kind)) {
+    return 'session'
+  }
+  return undefined
+}
+
+/**
+ * The notes a usage reading earns, once per window per crossing. The weekly threshold is the
+ * coordinator's: it starts the graceful pause, and the lanes wait for its pause message. The
+ * session threshold is everyone's: each session checkpoints and pauses itself.
+ */
+export function usageNotes(
+  windows: readonly UsageWindow[],
+  c: Pick<CoordContext, 'isCoordinator' | 'pauseSessionPercent' | 'pauseWeeklyPercent' | 'pause'>,
+  noted: ReadonlySet<string>,
+): { notes: string[]; noted: Set<string> } {
+  const notes: string[] = []
+  const next = new Set(noted)
+  for (const w of windows) {
+    const kind = windowKind(w.kind)
+    const resets = w.resetsAt ? ` (resets ${w.resetsAt})` : ''
+    const pct = Math.round(w.percentUsed)
+    if (kind === 'week') {
+      if (w.percentUsed < c.pauseWeeklyPercent) {
+        next.delete(w.kind)
+      } else if (c.isCoordinator && c.pause !== 'pausing' && c.pause !== 'complete' && !next.has(w.kind)) {
+        next.add(w.kind)
+        notes.push(
+          `coordinator: weekly usage is at ${pct}%${resets}, past the ${c.pauseWeeklyPercent}% pause point. ` +
+            'Start the graceful pause now: `/coordinator pause` (or `coord pause`). Every lane finishes its atomic step, ' +
+            'updates its card and stops; nothing is lost. Going a little over while they finish is fine.',
+        )
+      }
+    } else if (kind === 'session') {
+      if (w.percentUsed < c.pauseSessionPercent) {
+        next.delete(w.kind)
+      } else if (!next.has(w.kind)) {
+        next.add(w.kind)
+        notes.push(
+          `coordinator: the session usage window is at ${pct}%${resets}. Checkpoint: update your lane card, park ` +
+            'the current step, tell the coordinator, and pause until it resets.',
+        )
+      }
+    }
+  }
+  return { notes, noted: next }
+}
+
 /** Runs `coord.py <args>` from this plugin's folder. */
 async function runCoord($: EngineInterface, python: string, args: string[], timeoutMs: number) {
   return $.process.run([python, `${$.plugin.root}/scripts/coord.py`, ...args], { timeoutMs })
@@ -38,6 +96,17 @@ async function readContext($: EngineInterface, python: string): Promise<CoordCon
     return undefined
   }
   return JSON.parse(ran.stdout) as CoordContext
+}
+
+/** One pass of the graceful pause, then the fresh context; a finished pause is announced. */
+async function tickPause($: EngineInterface, python: string): Promise<CoordContext | undefined> {
+  const ran = await runCoord($, python, ['pause', '--tick'], 120000)
+  const line = ran.stdout.trim().split('\n').pop() ?? ''
+  if (line.includes('complete')) {
+    $.ui.toast(`coordinator: ${line}`)
+  }
+  $.ui.status(`coord: ${line}`)
+  return readContext($, python)
 }
 
 /** The command line a session uses for the coordinator CLI. */
@@ -90,7 +159,8 @@ export const register: Register = (on, options) => {
   let ctx: CoordContext | undefined
   let calls = 0
   let retireLevel = 0
-  let pausedWindows = new Set<string>()
+  let noted: ReadonlySet<string> = new Set<string>()
+  let ticking = false
 
   on('session.start', async ($, e, next) => {
     // Bash children (the model's own coord.py runs, shell workers it starts) inherit these.
@@ -103,7 +173,12 @@ export const register: Register = (on, options) => {
     await $.env.set('COORD_WORKER_MODEL', str(options.workerModel, 'opus'))
     await $.env.set('COORD_MAX_LANES', String(num(options.maxLanes, 6)))
     await $.env.set('COORD_RETIRE_TOKENS', String(num(options.retireTokens, 250000)))
-    await $.env.set('COORD_PAUSE_AT_PERCENT', String(num(options.pauseAtPercent, 97)))
+    await $.env.set('COORD_PAUSE_SESSION_PERCENT', String(num(options.pauseSessionPercent, 97)))
+    await $.env.set('COORD_PAUSE_WEEKLY_PERCENT', String(num(options.pauseWeeklyPercent, 80)))
+    await $.env.set('COORD_PROBE_INTERVALS', str(options.probeIntervals, '0:60,70:20,78:10'))
+    await $.env.set('COORD_PROBE_COMMAND', str(options.probeCommand, 'claude --model haiku'))
+    await $.env.set('COORD_PAUSE_REMINDER_MIN', String(num(options.pauseReminderMin, 10)))
+    await $.env.set('COORD_PAUSE_GRACE_MIN', String(num(options.pauseGraceMin, 20)))
     await $.env.set('COORD_BUS_DIR', str(options.busDir, '.claude/bus'))
     await $.env.set('COORD_TRACKER_DB', str(options.trackerDb, '.claude/tasks/tasks.db'))
     await $.env.set('COORD_RULES_FILE', str(options.rulesFile, '.claude/coord/RULES_CORE.md'))
@@ -114,8 +189,24 @@ export const register: Register = (on, options) => {
     await $.env.set('COORD_MIN_BATTERY', String(num(options.minBattery, 40)))
     await $.command.register({
       name: 'coordinator',
-      description: 'Coordinate worker agents: init, status, lanes, spawn <role> [brief], retire, respawn, close-idle, questions, answer, preflight.',
-      argumentHint: '[init|status|lanes|spawn <role> [brief]|retire <role>|respawn <role>|close-idle|questions|answer <id> <text>|preflight]',
+      description: 'Coordinate worker agents: init, status, lanes, spawn, retire, respawn, close-idle, questions, answer, preflight, usage, pause, resume.',
+      argumentHint: '[init|status|lanes|spawn <role> [brief]|retire <role>|respawn <role>|close-idle|questions|answer <id> <text>|preflight|usage|pause|resume]',
+    })
+    // While a graceful pause runs, advance it every minute: close the lanes that checkpointed,
+    // remind the silent ones once, interrupt them after the grace period, write the resume list.
+    $.clock.every(60000, () => {
+      if (ctx?.pause === 'pausing' && !ticking) {
+        ticking = true
+        void tickPause($, python).then(
+          c => {
+            ctx = c ?? ctx
+            ticking = false
+          },
+          () => {
+            ticking = false
+          },
+        )
+      }
     })
     return next(e)
   })
@@ -164,14 +255,22 @@ export const register: Register = (on, options) => {
       retireLevel = reminder.level
       notes.push(reminder.text)
     }
-    for (const w of usage.rateLimits) {
-      if (w.percentUsed >= ctx.pauseAtPercent && !pausedWindows.has(w.kind)) {
-        pausedWindows = new Set([...pausedWindows, w.kind])
-        notes.push(
-          `coordinator: the ${w.kind} usage window is at ${Math.round(w.percentUsed)}%` +
-            `${w.resetsAt ? ` (resets ${w.resetsAt})` : ''}. Checkpoint: update your lane card, park the current step, ` +
-            'tell the coordinator, and pause until it resets.',
-        )
+    const u = usageNotes(usage.rateLimits, ctx, noted)
+    noted = u.noted
+    notes.push(...u.notes)
+    if (ctx.isCoordinator) {
+      // Shared with `coord usage` and the watcher: the coordinator session's own reading counts as a probe.
+      const week = usage.rateLimits.find(w => windowKind(w.kind) === 'week')
+      const session = usage.rateLimits.find(w => windowKind(w.kind) === 'session')
+      if (week !== undefined || session !== undefined) {
+        void runCoord($, python, [
+          'record-usage',
+          ...(week ? ['--week', String(Math.round(week.percentUsed))] : []),
+          ...(session ? ['--session', String(Math.round(session.percentUsed))] : []),
+        ], 15000)
+      }
+      if (u.notes.length > 0) {
+        $.ui.toast('coordinator: usage threshold reached; see the note in the transcript')
       }
     }
     if (notes.length === 0) {
