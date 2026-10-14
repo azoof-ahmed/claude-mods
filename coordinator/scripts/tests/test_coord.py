@@ -393,5 +393,36 @@ class CoordTest(unittest.TestCase):
         self.assertEqual(lanes['fast']['brief'], '.claude/coord/briefs/RESUME.md')
 
 
+
+class BusCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.env = mock.patch.dict(os.environ, {'AGENT_BUS_CLI': ''})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def touch(self, rel):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('')
+        return p
+
+    def test_finds_a_sibling_in_a_checkout(self):
+        bus = self.touch('agent-bus/scripts/bus.py')
+        self.assertEqual(coord.bus_cli(self.root / 'coordinator' / 'scripts')[1], str(bus))
+
+    def test_finds_the_newest_cached_version(self):
+        self.touch('agent-bus/0.1.2/scripts/bus.py')
+        newest = self.touch('agent-bus/0.1.10/scripts/bus.py')
+        self.assertEqual(coord.bus_cli(self.root / 'coordinator' / '0.2.3' / 'scripts')[1], str(newest))
+
+    def test_none_without_agent_bus(self):
+        self.assertIsNone(coord.bus_cli(self.root / 'coordinator' / '0.2.3' / 'scripts'))
+
+
 if __name__ == '__main__':
     unittest.main()

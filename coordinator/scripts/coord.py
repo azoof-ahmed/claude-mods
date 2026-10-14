@@ -186,9 +186,22 @@ def now():
 
 # ---- the bus and the tracker, when their plugins are installed
 
-def bus_cli():
-    """The agent-bus CLI as an argv prefix, or None. Found via AGENT_BUS_CLI or a sibling plugin folder."""
-    cands = [os.environ.get('AGENT_BUS_CLI', ''), str(HERE.parent.parent / 'agent-bus' / 'scripts' / 'bus.py')]
+def _version_key(path):
+    """Sort key for a cached plugin's version folder: numeric parts compare as numbers."""
+    return [int(p) if p.isdigit() else -1 for p in re.split(r'[.\-+]', path.parent.parent.name)]
+
+
+def bus_cli(here=None):
+    """The agent-bus CLI as an argv prefix, or None.
+
+    Found via AGENT_BUS_CLI (set by the agent-bus hook inside a session), else a sibling plugin folder.
+    Siblings sit side by side in a checkout (<repo>/agent-bus) but in versioned folders in Claude Code's
+    plugin cache (<cache>/<marketplace>/agent-bus/<version>), so a plain shell needs both layouts.
+    """
+    plugin = (here or HERE).parent  # .../coordinator or .../coordinator/<version>
+    cands = [os.environ.get('AGENT_BUS_CLI', ''), str(plugin.parent / 'agent-bus' / 'scripts' / 'bus.py')]
+    cached = sorted(plugin.parent.parent.glob('agent-bus/*/scripts/bus.py'), key=_version_key, reverse=True)
+    cands += [str(c) for c in cached]
     for c in cands:
         if c and Path(c).is_file():
             return [sys.executable, c]
