@@ -314,14 +314,21 @@ def open_terminal(cfg, role, repo, cmd, dry=False):
     """Start `cmd` for `role` in a new terminal; returns (handle, how). The worker's env carries AGENT_BUS_ROLE."""
     b = cfg['backend']
     if b == 'orca':
+        # Open a plain shell, then type the worker command into it. `create --command <interactive TUI>` makes
+        # orca time out waiting for the handle ("Timed out waiting for terminal handle after creation") once
+        # the TUI owns the terminal, and no tab is left to adopt; the usage probe already works this way.
         before = set() if dry else orca_titled(repo, role)
-        r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', role,
-                 '--command', with_env(cfg, role, cmd), '--json'], dry)
+        r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', role, '--json'], dry)
         handle = orca_handle(r.stdout)
         if not handle and not dry:
             if r.returncode == 0:
                 orca_close_by_title(repo, role, before)  # the tab may exist: never leave an orphan
             raise SystemExit(f'coordinator: orca terminal create failed: {r.stderr.strip() or r.stdout.strip()}')
+        s = run(['orca', 'terminal', 'send', '--terminal', handle or '<handle>', '--text', with_env(cfg, role, cmd),
+                 '--enter', '--json'], dry)
+        if s.returncode != 0 and not dry:
+            run(['orca', 'terminal', 'close', '--terminal', handle, '--tab'])
+            raise SystemExit(f'coordinator: orca terminal send failed: {s.stderr.strip() or s.stdout.strip()}')
         return handle, 'orca'
     if b == 'tmux':
         target = []

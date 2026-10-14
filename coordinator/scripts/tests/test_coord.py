@@ -301,6 +301,20 @@ class CoordTest(unittest.TestCase):
         closes = [c for c in calls if c[:3] == ['orca', 'terminal', 'close']]
         self.assertEqual(closes, [['orca', 'terminal', 'close', '--terminal', 'term_123', '--tab']])
 
+    def test_orca_spawn_opens_a_shell_then_types_the_worker_command(self):
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        cfg['backend'] = 'orca'
+        calls = []
+        with mock.patch.object(coord, 'run', self.fake_orca(self.ORCA_CREATE, calls)):
+            self.assertEqual(coord.open_terminal(cfg, 'w1', str(self.root), 'claude --model opus'), ('term_123', 'orca'))
+        create = next(c for c in calls if c[:3] == ['orca', 'terminal', 'create'])
+        self.assertNotIn('--command', create)  # an interactive --command times orca out waiting for the handle
+        send = next(c for c in calls if c[:3] == ['orca', 'terminal', 'send'])
+        self.assertEqual(send[send.index('--terminal') + 1], 'term_123')
+        self.assertIn('AGENT_BUS_ROLE=w1 claude --model opus', send[send.index('--text') + 1])
+        self.assertIn('--enter', send)
+
     def test_orca_unreadable_create_closes_the_tab_by_title(self):
         self.run_cli('init')
         cfg = coord.Config(self.root)
