@@ -44,7 +44,7 @@ The agent itself uses the CLI that its session context names: `python "<plugin>/
 | --- | --- | --- |
 | The agent is working | A **PostToolUse hook** checks the role's inbox size after each tool call. Only when the inbox grew does it run the bus and add new urgent and normal mail to the model's context. | No extra turn |
 | The agent is about to go idle | A **Stop hook** holds the agent back once if it has unread mail and hands it the mail. Once per 10 minutes, if no watch is live, it asks the agent to arm one before idling. | One continuation |
-| The agent is idle | A **Monitor** running `timeout 1790 bus watch --as <role>` (timeout 1800000 ms) prints one line per new non-fyi message. The line wakes the agent. | A turn per message |
+| The agent is idle | A **Monitor** running `bus watch --as <role> --for 1790` (timeout 1800000 ms) prints one line per new non-fyi message. The line wakes the agent. | A turn per message |
 | Session start | A **SessionStart hook** names the role and the CLI, serves the backlog and, unless a watch is already live, asks the agent to arm the Monitor. | None |
 | Backstop (orca backend only) | The **deliver daemon** (`bus deliver`) types one nudge into an idle Orca tab after `nudgeAfter` seconds of unread mail. It never nudges a role with a live watch. | One turn |
 

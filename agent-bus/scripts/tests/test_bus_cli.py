@@ -133,6 +133,16 @@ class BusCliTest(unittest.TestCase):
             p.stdout.close()
             p.stderr.close()
 
+    def test_watch_for_ends_on_its_own_and_clears_the_heartbeat(self):
+        run(['init', '--roles', 'worker-a'], self.root)
+        env = {**os.environ, **CLEAN, 'AGENT_BUS_ROLE': 'worker-a'}
+        started = time.time()
+        p = subprocess.run([sys.executable, str(SCRIPTS / 'bus.py'), 'watch', '--for', '1'], cwd=self.root, env=env,
+                           capture_output=True, timeout=20)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(time.time() - started, 15)
+        self.assertFalse(bus.watch_live(self.dir, 'worker-a'))
+
     def test_deliver_skips_nudges_for_watched_roles(self):
         from orca_bus import deliver
         b = Bus(self.dir)

@@ -38,7 +38,7 @@ Every worker reads this file at startup. Keep it under 100 lines. Rules that no 
   - Release the slot when you are done.
 - **Before a heavy job**, run `{{coord}} preflight`. Exit 0 means GO, 1 means WAIT, and it prints the reasons.
 - **Processes:** kill only PIDs you started. Never kill by name.
-- **Monitors:** wrap long-running Monitor commands as `timeout 1790 ...`, so they never outlive the Monitor.
+- **Monitors:** bound long-running Monitor commands so they never outlive the Monitor: `bus watch --for 1790`, or a loop with its own deadline. Don't rely on `timeout`; macOS and Windows don't ship it.
 
 ## 6. Messages
 - **With the agent-bus plugin:**

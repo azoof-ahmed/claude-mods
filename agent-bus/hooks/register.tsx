@@ -145,7 +145,7 @@ export function busArgs(typed: string): string[] | string | null {
 
 /** The Monitor command that keeps an idle agent listening. */
 export function watchCommand(out: HookOut): string {
-  return `timeout 1790 ${out.cli} watch --as ${out.role}`
+  return `${out.cli} watch --as ${out.role} --for 1790`
 }
 
 export function armLine(out: HookOut): string {

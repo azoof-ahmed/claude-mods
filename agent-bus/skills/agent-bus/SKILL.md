@@ -12,7 +12,7 @@ The session-start context names your role and the exact CLI (`<python> "<plugin>
 ## Reading
 - **While you work:** new urgent and normal mail is added after your tool calls as "Bus mail for <role> ...". You do not poll.
 - **When you go idle:** a Monitor wakes you. Arm it once with the Monitor tool when the context asks:
-  - command: `timeout 1790 bus watch --as <role>`;
+  - command: `bus watch --as <role> --for 1790`;
   - timeout: 1800000 ms.
 
   It prints one line per new non-fyi message. When it ends, arm it again. Never run two of them.

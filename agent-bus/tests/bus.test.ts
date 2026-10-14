@@ -41,7 +41,7 @@ test('session start tells a registered role its CLI and asks for a Monitor when 
   const r = await $.classic.SessionStart({ source: 'startup' } as never)
   const text = (r.additionalContext ?? []).join('\n')
   expect(text).toContain('you are `worker-a`')
-  expect(text).toContain(`timeout 1790 ${CLI} watch --as worker-a`)
+  expect(text).toContain(`${CLI} watch --as worker-a --for 1790`)
   expect(text).toContain('1800000')
 })
 

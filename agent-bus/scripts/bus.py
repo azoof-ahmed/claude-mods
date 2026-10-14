@@ -4,7 +4,7 @@
     python bus.py send <to> "<text>" [--prio urgent|normal|fyi] [--re ID] [--cc a,b] [--topic T] [--body-file F]
     python bus.py digest --as <role>                     unread mail, one line each
     python bus.py read <id>                              full text + body
-    python bus.py watch --as <role>                      for a Monitor: one line per new non-fyi message
+    python bus.py watch --as <role> [--for S]            for a Monitor: one line per new non-fyi message; --for ends it after S seconds
     python bus.py watch-live --as <role>                 exit 0 when a live watch (heartbeat) exists for the role
     python bus.py whoami                                 the role this session resolves to
     python bus.py hook --event PostToolUse|Stop          serve new mail as JSON {"text": ...} (used by the mod)
@@ -554,7 +554,18 @@ def main(argv=None):
         if not role:
             print('agent-bus: who are you? pass --as <role> or set AGENT_BUS_ROLE', file=sys.stderr)
             return 2
+        # --for SECONDS: end the watch on its own, so it never outlives a Monitor. This replaces wrapping it in
+        # `timeout`, which macOS and Windows do not ship (the wrapped command died with "command not found").
+        limit = take(argv, '--for')
         clear = start_heartbeat(root, role)
+        if limit:
+            def expire():
+                clear()
+                sys.stdout.flush()
+                os._exit(0)
+            timer = threading.Timer(float(limit), expire)
+            timer.daemon = True
+            timer.start()
         try:
             return orca_main(['watch', '--as', role] + argv[1:], root=root, default_reply_cmd=reply_cmd())
         except KeyboardInterrupt:
