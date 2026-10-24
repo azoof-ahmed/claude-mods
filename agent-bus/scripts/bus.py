@@ -31,6 +31,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -276,7 +277,170 @@ def tui_verb(argv, cfg, root):
 
 
 def reply_cmd():
-    return f'{os.environ.get("AGENT_BUS_PYTHON") or "python"} "{Path(__file__).resolve().as_posix()}"'
+    """The command other sessions run to reach this CLI: the configured python resolved to its full path (else this
+    interpreter; never a bare `python`, which many systems lack) and this script's own, versioned, path."""
+    import shutil
+    # the hooks always export AGENT_BUS_PYTHON (default `python`): resolve it, and fall back when it is not there
+    want = os.environ.get('AGENT_BUS_PYTHON')
+    py = (shutil.which(want) if want else None) or sys.executable or 'python3'
+    if ' ' in py:
+        py = f'"{py}"'
+    return f'{py} "{Path(__file__).resolve().as_posix()}"'
+
+
+def _cache_version(path):
+    """(1, 2, 3) for .../agent-bus/1.2.3/scripts/bus.py, or None outside a versioned plugin cache."""
+    parts = Path(path).parts
+    if len(parts) >= 3 and parts[-2] == 'scripts':
+        v = parts[-3].split('.')
+        if all(x.isdigit() for x in v):
+            return tuple(int(x) for x in v)
+    return None
+
+
+def reply_cmd_stale(cur, want):
+    """True when the bus config's reply_cmd should be replaced by `want`: its python or script is missing, or it
+    names an older version of this plugin. A newer version's command is left alone (no flapping between sessions)."""
+    import shlex
+    import shutil
+    if not cur:
+        return True
+    if cur == want:
+        return False
+    try:
+        argv = shlex.split(cur)
+    except ValueError:
+        return True
+    if len(argv) != 2:
+        return False  # a hand-written command (orca-bus, a wrapper): not ours to touch
+    py, script = argv
+    if not (shutil.which(py) or Path(py).is_file()) or not Path(script).is_file():
+        return True
+    old, new = _cache_version(script), _cache_version(shlex.split(want)[-1])
+    return bool(old and new and old < new)
+
+
+def refresh_reply_cmd(root):
+    """Rewrite the bus config's reply_cmd when it is stale (see reply_cmd_stale); returns True if it did."""
+    p = Path(root) / 'config.json'
+    try:
+        conf = json.loads(p.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    want = reply_cmd()
+    if not isinstance(conf, dict) or not reply_cmd_stale(conf.get('reply_cmd'), want):
+        return False
+    conf['reply_cmd'] = want
+    tmp = p.with_name(f'config.{os.getpid()}.tmp')  # many sessions' hooks may refresh at once after an upgrade
+    try:
+        tmp.write_text(json.dumps(conf, indent=1), encoding='utf-8')
+        os.replace(tmp, p)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return False
+    return True
+
+
+# ---- the deliver daemon: started by the hook when the backend is orca
+#
+# One daemon per bus dir. It is alive while the pid in deliver.pid is a running deliver process; the heartbeat only
+# tells a hung daemon (no tick for DELIVER_HUNG_S) from a slow one, since one tick can wait 60 s on each orca call.
+
+DELIVER_HUNG_S = 600
+
+
+def pid_is_deliver(pid):
+    """True when `pid` is a running deliver daemon (not a dead pid, nor a reuse of it by another program)."""
+    import subprocess
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        pass
+    except OSError:
+        return False
+    if os.name == 'nt':
+        return True
+    r = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, **TEXT)
+    return ' deliver' in r.stdout
+
+
+def deliver_pid(root):
+    try:
+        pid = int(json.loads((Path(root) / 'deliver.pid').read_text(encoding='utf-8'))['pid'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return pid if pid_is_deliver(pid) else None
+
+
+def deliver_state(root, now=None):
+    """'running', 'hung' (its pid lives but it has not ticked for DELIVER_HUNG_S) or None."""
+    pid = deliver_pid(root)
+    if not pid:
+        return None
+    try:
+        age = (now or time.time()) - (Path(root) / 'deliver.heartbeat').stat().st_mtime
+    except OSError:
+        return 'running'  # started, first tick not written yet
+    return 'hung' if age > DELIVER_HUNG_S else 'running'
+
+
+@contextmanager
+def start_lock(root):
+    """Yields True to the one caller holding the bus dir's deliver start lock, False to the others (no waiting)."""
+    path = Path(root) / 'deliver.lock'
+    f = open(path, 'a+')
+    try:
+        try:
+            import fcntl
+        except ImportError:  # Windows
+            import msvcrt
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                yield False
+                return
+            yield True
+            return
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        f.close()  # closing releases the lock
+
+
+def ensure_deliver(root, cfg, now=None, start=None):
+    """Start the deliver daemon for this bus dir unless one is running; a hung one is stopped and replaced.
+    Sessions that hook at the same moment are serialised by the start lock, and the new pid is written to
+    deliver.pid before the lock is released. Returns the pid it started, else None."""
+    import shutil
+    if cfg['backend'] != 'orca' or Path(root, 'deliver.STOP').exists():
+        return None
+    if start is None and not shutil.which('orca'):
+        return None
+    try:  # the cheap path every hook takes while a daemon ticks: no process lookup, no lock
+        if (now or time.time()) - (Path(root) / 'deliver.heartbeat').stat().st_mtime < DELIVER_STALE_S:
+            return None
+    except OSError:
+        pass
+    with start_lock(root) as mine:
+        if not mine:
+            return None
+        state = deliver_state(root, now)
+        if state == 'running':
+            return None
+        if state == 'hung':
+            import signal
+            try:
+                os.kill(deliver_pid(root), signal.SIGTERM)
+            except (OSError, TypeError):
+                pass
+        argv = [sys.executable, str(Path(__file__).resolve()), '--dir', str(root), 'deliver']
+        pid = (start or detach)(argv, Path(root) / 'deliver.out')
+        (Path(root) / 'deliver.pid').write_text(json.dumps({'pid': pid, 'started': now or time.time()}))
+        return pid
 
 
 def resolve_role(bus, explicit=None):
@@ -469,6 +633,34 @@ def snapshot_verb(argv, root):
     return 0
 
 
+def patch_deliverer(deliver, root):
+    """Swap in agent-bus's delivery daemon: orca-bus's (vendored or from orcaBusPath) with two changes."""
+    base = deliver.Deliverer
+    if getattr(base, 'agent_bus', False):
+        return
+
+    class Deliverer(base):
+        agent_bus = True
+
+        def nudge_deaf(self, reg=None):
+            # a role whose Monitor watch is alive reads its mail: never spend one of its turns on a nudge
+            reg = reg if reg is not None else self.bus.registry()
+            base.nudge_deaf(self, {n: e for n, e in reg.items() if not watch_live(root, n)})
+
+        def tick(self):
+            # orca-bus's tick returns before nudge_deaf when nothing is queued, and file-mode mail is filed at
+            # once, so an idle worker's unread mail never got its nudge
+            n = base.tick(self)
+            from orca_bus.store import OPEN_STATES
+            if not any(m['state'] in OPEN_STATES for m in self.bus.messages().values()):
+                try:
+                    self.nudge_deaf()
+                except Exception as ex:
+                    self.log(f'NUDGE ERROR {ex}')
+            return n
+    deliver.Deliverer = Deliverer
+
+
 def take(argv, flag):
     """Pop `--flag value` from argv; return the value or None."""
     if flag in argv:
@@ -509,7 +701,7 @@ def main(argv=None):
         bus = Bus(root)
         p = Path(root) / 'config.json'
         conf = bus.config()
-        conf.update({'reply_cmd': reply_cmd()})
+        conf['reply_cmd'] = reply_cmd()  # init always writes this CLI's own command
         conf.setdefault('notify', ['coordinator'])
         p.write_text(json.dumps(conf, indent=1), encoding='utf-8')
         names = [r.strip() for r in str(roles).split(',') if r.strip()]
@@ -540,6 +732,10 @@ def main(argv=None):
         role = resolve_role(bus, take(argv, '--as'))
         out = {'bus': True, 'dir': str(Path(root).resolve().as_posix()), 'role': role, 'text': None,
                'watch': False, 'registered': False, 'cli': reply_cmd()}
+        if event in ('SessionStart', 'Stop'):
+            refresh_reply_cmd(root)  # a stale command in config.json reaches every nudge, watch and reply line
+        if cfg['backend'] == 'orca':
+            out['deliver'] = bool(ensure_deliver(root, cfg)) or deliver_state(root) == 'running'
         if role:
             entry = bus.registry().get(role) or {}
             out['registered'] = bool(entry)
@@ -578,13 +774,12 @@ def main(argv=None):
             print('agent-bus: the deliver daemon types into Orca terminals; backend is "none", so mail is served by '
                   'the hook and the watch alone. Set the backend option to orca to run it.', file=sys.stderr)
             return 2
+        other = deliver_pid(root)
+        if other and other != os.getpid() and '--once' not in argv:
+            print(f'agent-bus: a deliver daemon (pid {other}) already runs for {root}', file=sys.stderr)
+            return 1
         from orca_bus import deliver
-        orig = deliver.Deliverer.nudge_deaf
-
-        def nudge_unless_watched(self, reg=None):
-            reg = reg if reg is not None else self.bus.registry()
-            orig(self, {n: e for n, e in reg.items() if not watch_live(root, n)})
-        deliver.Deliverer.nudge_deaf = nudge_unless_watched
+        patch_deliverer(deliver, root)
         if '--nudge-after' not in argv:
             argv += ['--nudge-after', str(cfg['nudgeAfter'])]
         return orca_main(argv, root=root, default_reply_cmd=reply_cmd())

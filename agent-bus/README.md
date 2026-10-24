@@ -46,7 +46,7 @@ The agent itself uses the CLI that its session context names: `python "<plugin>/
 | The agent is about to go idle | A **Stop hook** holds the agent back once if it has unread mail and hands it the mail. Once per 10 minutes, if no watch is live, it asks the agent to arm one before idling. | One continuation |
 | The agent is idle | A **Monitor** running `bus watch --as <role> --for 1790` (timeout 1800000 ms) prints one line per new non-fyi message. The line wakes the agent. | A turn per message |
 | Session start | A **SessionStart hook** names the role and the CLI, serves the backlog and, unless a watch is already live, asks the agent to arm the Monitor. | None |
-| Backstop (orca backend only) | The **deliver daemon** (`bus deliver`) types one nudge into an idle Orca tab after `nudgeAfter` seconds of unread mail. It never nudges a role with a live watch. | One turn |
+| Backstop (orca backend only) | The **deliver daemon** (`bus deliver`) types one nudge into an idle Orca tab after `nudgeAfter` seconds of unread mail. It never nudges a role with a live watch. The hooks start it (one per bus dir) and restart it when its heartbeat goes stale. | One turn |
 
 **How "a watch is live" is known:** `bus watch` writes a heartbeat (`inbox/<role>.watch.json`, refreshed every 30 s, stale after 90 s). The hooks and the daemon read it, so nobody is asked to arm a second Monitor and nobody is nudged while one listens.
 
@@ -72,7 +72,7 @@ The agent itself uses the CLI that its session context names: `python "<plugin>/
 | `register <role> --kind claude --mode file [--handle H]` | Joins the bus. |
 | `chat [--detach\|--status\|--stop] [--port N] [--bind A]` | The web chat. |
 | `tui [--open] [--as R] [--theme T]` | The terminal client. |
-| `deliver` | The typing daemon. It needs the orca backend and runs in its own terminal. |
+| `deliver` | The typing daemon. It needs the orca backend. Every session's hook starts it in the background unless the pid in `deliver.pid` is a running daemon (one per bus dir, under a start lock); one that has not ticked for 10 minutes is stopped and replaced. Output goes to `deliver.out` and `deliver.log` in the bus dir. Create `deliver.STOP` there to stop it and keep it stopped. |
 | `whoami`, `watch-live` | Diagnostics. |
 
 **Who is notified:**
@@ -300,6 +300,8 @@ Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`
 | `taskPrefix` | `TASK` | Task ids with this prefix (`TASK-12`) become task chips in the chat. |
 | `band` | `on` | `off` hides the unread band above the prompt. |
 | `theme` | `tokyonight` | The `/bus` pane's colors: `tokyonight` or `claude`. |
+
+The bus's `config.json` holds `reply_cmd`, the command printed in every reply hint, nudge and watch line. `init` writes this CLI's own (the `python` option resolved to a full path, else the interpreter running it, and the versioned script path), and each session's start and stop hooks replace it when its python or script is missing or it names an older plugin version.
 
 **Roles:** a session's role is resolved in this order:
 
