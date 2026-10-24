@@ -54,12 +54,13 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | Verb | What it does |
 | --- | --- |
 | `init [--roles a,b] [--force]` | Scaffolds the files above. Existing files are kept unless you pass `--force`. |
-| `spawn <role> [brief] [--model M] [--repo P] [--dry-run]` | Starts a worker on a brief (default: the resume brief) through the backend. It refuses past `maxLanes`. |
+| `spawn <role> [brief] [--model M] [--repo P] [--coordinator] [--dry-run]` | Starts a worker on a brief (default: the resume brief) through the backend. It refuses past `maxLanes`; the coordinator's own lane (role `coordinator`, or `--coordinator`) never counts, so a coordinator can always start its successor. A tmux session still running an earlier generation of the role is killed first. |
 | `retire <role> [--close]` | Asks the worker, by urgent bus mail, to update its card and stop. `--close` also closes its terminal. |
-| `respawn <role>` | Closes the worker and starts a successor on the resume brief. The successor picks up from the card. |
-| `status` | A report: live lanes with their card's State lines, open questions, safe-to-close lanes and the coordinator's inbox. |
+| `respawn <role>` | Closes the worker and starts a successor on the resume brief. The successor picks up from the card. It refuses if the old worker is still running after the close. |
+| `status` | A report: live lanes with their card's State lines, open questions, safe-to-close lanes, orphan sessions and the coordinator's inbox. An orca lane whose terminal is gone, with nothing left running, is marked closed. |
 | `lanes [--json]` | Lanes with backend, generation, card age and size, tracker tasks and the last SAFE TO CLOSE / KEEP OPEN. |
 | `close-idle [--dry-run]` | Closes lanes whose last word is SAFE TO CLOSE. |
+| `reap [<role>...] [--dry-run]` | Kills the tmux sessions still running a retired or replaced lane (see below), or every session of the named lanes. |
 | `ask "<q>" [--from R] [--options "a\|b"]` | Queues a question for the user. |
 | `questions [--all]` | Lists open questions (or all of them). |
 | `answer <qid> "<a>"` | Records the answer and sends it to the asker on the bus. |
@@ -76,9 +77,11 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `backend` | How a worker starts | Retire/close |
 | --- | --- | --- |
 | `manual` (default) | Prints the command, with `AGENT_BUS_ROLE` set, for you to run in a new terminal. | You close it. |
-| `orca` | `orca terminal create --worktree path:<repo> --title <role> --command ...`. The handle is registered on the bus. | `orca terminal close --tab` |
+| `orca` | `orca terminal create --worktree path:<repo> --title <role>`, then the worker command is typed into it. The handle is registered on the bus. | `orca terminal close --tab` |
 | `tmux` | `tmux new-window -n <role> -c <repo> -e AGENT_BUS_ROLE=<role>`, in the current session or a detached `coord` session. | `tmux kill-window` |
 | `wt` | A new Windows Terminal tab (`wt -w 0 nt --title <role> -d <repo>`). | You close it. |
+
+**Wrappers that run the agent in their own tmux session** (claude-auto-retry, for one) only attach the terminal to that session, so closing the terminal leaves the agent running, detached, beside its successor. Every close (`retire --close`, `respawn`, `close-idle`, a pause interrupt) therefore also kills the tmux sessions whose environment names the lane (`ORCA_TERMINAL_HANDLE` = its handle, or `AGENT_BUS_ROLE` = its role), then waits for their processes to exit, escalating to SIGTERM and SIGKILL for those pids only. The caller's own session is never touched. `status` lists any session that survived as an orphan; `reap` kills it.
 
 The worker command comes from two templates:
 

@@ -1,6 +1,6 @@
 {
   "name": "coordinator",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports, token-economy reminders, and a usage watcher with a graceful pause and resume.",
   "author": {
     "name": "Azoof Ahmed"

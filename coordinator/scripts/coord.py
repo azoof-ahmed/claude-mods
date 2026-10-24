@@ -1,13 +1,15 @@
 """coordinator: run many worker agents, each in its own terminal with a brief, from one coordinator session.
 
     python coord.py init [--roles a,b] [--force]       scaffold rules, templates, the question queue and config
-    python coord.py spawn <role> [<brief>] [--repo P] [--model M] [--dry-run]
-                                                        start a worker on a brief (default: the resume brief)
+    python coord.py spawn <role> [<brief>] [--repo P] [--model M] [--coordinator] [--dry-run]
+                                                        start a worker on a brief (default: the resume brief);
+                                                        --coordinator (or role `coordinator`) skips maxLanes
     python coord.py retire <role> [--close]             ask a worker to update its card and stop; --close its terminal
     python coord.py respawn <role> [--dry-run]          close the worker and start a successor on its lane card
     python coord.py lanes [--json]                      the lanes, their terminals, cards and tasks
     python coord.py status                              a status report: lanes, open questions, safe-to-close
     python coord.py close-idle [--dry-run]              close the terminals of lanes whose last word is SAFE TO CLOSE
+    python coord.py reap [<role>...] [--dry-run]        kill tmux sessions still running retired lanes (or these lanes)
     python coord.py ask "<question>" [--from ROLE] [--options "a|b"]   queue a question for the user
     python coord.py questions [--all]                   the open (or all) questions
     python coord.py answer <qid> "<answer>"             answer a question; the asker gets it on the bus
@@ -352,15 +354,165 @@ def open_terminal(cfg, role, repo, cmd, dry=False):
 
 
 def close_terminal(cfg, lane, dry=False):
+    """Close the lane's terminal, then reap any tmux session still running it (see reap_lane)."""
     h, how = lane.get('handle'), lane.get('backend')
+    ok = False
     if how == 'orca' and h:
-        r = run(['orca', 'terminal', 'close', '--terminal', h, '--tab'], dry)
-        return r.returncode == 0
-    if how == 'tmux' and h:
-        r = run(['tmux', 'kill-window', '-t', h], dry)
-        return r.returncode == 0
-    print(f'Close the terminal of {lane.get("role")} yourself ({how}: no handle to close).')
-    return False
+        ok = run(['orca', 'terminal', 'close', '--terminal', h, '--tab'], dry).returncode == 0
+    elif how == 'tmux' and h:
+        ok = run(['tmux', 'kill-window', '-t', h], dry).returncode == 0
+    else:
+        print(f'Close the terminal of {lane.get("role")} yourself ({how}: no handle to close).')
+    reaped, alive = reap_lane(lane, dry)
+    if reaped:
+        print(f'{lane.get("role")}: killed tmux session(s) {", ".join(reaped)}')
+    if alive:
+        print(f'{lane.get("role")}: WARNING pid(s) {", ".join(map(str, alive))} still running after the close')
+    return ok and not alive
+
+
+# ---- tmux sessions that outlive their terminal
+#
+# A `claude` wrapper such as claude-auto-retry runs the agent inside its own tmux session and only attaches the
+# terminal to it. Closing the terminal detaches the session; the agent keeps working beside its successor. The
+# session's environment still names the lane: AGENT_BUS_ROLE (with_env sets it) and ORCA_TERMINAL_HANDLE.
+
+def tmux_sessions(dry=False):
+    """[{name, attached, role, handle, pids}] for every tmux session; pids are its pane processes and their
+    descendants. Empty without tmux."""
+    if dry or os.name == 'nt' or not shutil.which('tmux'):
+        return []
+    r = run(['tmux', 'list-sessions', '-F', '#{session_name}\t#{session_attached}'])
+    if r.returncode != 0:
+        return []
+    children = {}
+    ps = run(['ps', '-axo', 'pid=,ppid='])
+    for ln in (ps.stdout or '').splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    out = []
+    for ln in (r.stdout or '').splitlines():
+        name, _, attached = ln.partition('\t')
+        if not name:
+            continue
+        env = {}
+        for e in (run(['tmux', 'show-environment', '-t', name]).stdout or '').splitlines():
+            k, eq, v = e.partition('=')
+            if eq:
+                env[k] = v
+        panes = run(['tmux', 'list-panes', '-s', '-t', name, '-F', '#{pane_pid}']).stdout or ''
+        pids, todo = [], [int(p) for p in panes.split() if p.isdigit()]
+        while todo:
+            p = todo.pop()
+            pids.append(p)
+            todo.extend(children.get(p, []))
+        out.append({'name': name, 'attached': attached.strip() not in ('', '0'), 'role': env.get('AGENT_BUS_ROLE'),
+                    'handle': env.get('ORCA_TERMINAL_HANDLE'), 'pids': pids})
+    return out
+
+
+def own_pids():
+    """This process and its ancestors: a session holding one of them is the caller's own and is never reaped."""
+    pids, p = set(), os.getpid()
+    parent = {}
+    r = run(['ps', '-axo', 'pid=,ppid=']) if os.name != 'nt' else None
+    for ln in ((r.stdout if r else '') or '').splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            parent[int(parts[0])] = int(parts[1])
+    while p and p not in pids:
+        pids.add(p)
+        p = parent.get(p)
+    return pids
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_sessions(sessions, dry=False, wait_s=5.0):
+    """Kill these tmux sessions and make sure their processes exit: tmux hangs them up; any pid still alive after
+    `wait_s` gets SIGTERM, then SIGKILL. Only pids that belonged to these sessions are signalled.
+    Returns (names killed, pids still alive)."""
+    import signal
+    names, pids = [], []
+    for s in sessions:
+        r = run(['tmux', 'kill-session', '-t', s['name']], dry)
+        if r.returncode == 0:
+            names.append(s['name'])
+        pids.extend(s['pids'])
+    if dry:
+        return names, []
+    for sig in (None, signal.SIGTERM, signal.SIGKILL):
+        if sig is not None:
+            for p in pids:
+                if pid_alive(p):
+                    try:
+                        os.kill(p, sig)
+                    except OSError:
+                        pass
+        deadline = time.monotonic() + wait_s
+        while any(pid_alive(p) for p in pids) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        pids = [p for p in pids if pid_alive(p)]
+        if not pids:
+            break
+    return names, pids
+
+
+def lane_sessions(lane, sessions):
+    """The sessions running this lane: its terminal handle, or its role (any other session with the role is an
+    older generation's orphan). The caller's own session is excluded."""
+    if not sessions:
+        return []
+    mine = own_pids()
+    h, role = lane.get('handle'), lane.get('role')
+    return [s for s in sessions if not mine & set(s['pids'])
+            and ((h and s['handle'] == h) or (role and s['role'] == role))]
+
+
+def reap_lane(lane, dry=False):
+    found = lane_sessions(lane, tmux_sessions(dry))
+    return kill_sessions(found, dry) if found else ([], [])
+
+
+def orca_live_handles(dry=False):
+    """Handles of every live orca terminal, or None when orca can't be asked."""
+    if dry or not shutil.which('orca'):
+        return None
+    r = run(['orca', 'terminal', 'list', '--limit', '1000', '--json'])
+    try:
+        res = json.loads(r.stdout or '{}')
+        terms = (res.get('result') or {}).get('terminals') or res.get('terminals') or []
+    except (ValueError, AttributeError):
+        return None
+    if r.returncode != 0:
+        return None
+    return {t['handle'] for t in terms if isinstance(t, dict) and t.get('handle')}
+
+
+def orphans(cfg, lanes, sessions=None, handles=None):
+    """Sessions running a lane that should not be running: its lane is not live, or it is detached from a terminal
+    that is gone or is not the live lane's."""
+    sessions = tmux_sessions() if sessions is None else sessions
+    out = []
+    for s in sessions:
+        lane = lanes.get(s['role']) if s['role'] else None
+        if lane is None:
+            continue
+        if lane.get('state') not in ('live', 'retiring'):
+            out.append(s)
+        elif not s['attached'] and s['handle'] and (
+                s['handle'] != lane.get('handle') or (handles is not None and s['handle'] not in handles)):
+            out.append(s)
+    return out
 
 
 # ---- verbs
@@ -421,6 +573,12 @@ def cmd_init(cfg, args):
     return 0
 
 
+def is_coordinator(role, lane):
+    """The coordinator's own lane (role `coordinator` or kind `coordinator`) never counts toward maxLanes, so a
+    coordinator can always start its successor."""
+    return role == 'coordinator' or lane.get('kind') == 'coordinator'
+
+
 def cmd_spawn(cfg, args):
     dry = '--dry-run' in args
     repo = take(args, '--repo') or cfg.repos()[0]
@@ -435,12 +593,20 @@ def cmd_spawn(cfg, args):
     if not (cfg.root / brief).exists() and not Path(brief).exists():
         raise SystemExit(f'coordinator: no brief at {brief}')
     lanes = load_lanes(cfg)
-    live = [r for r, l in lanes.items() if l.get('state') == 'live' and r != role]
-    if len(live) >= cfg['maxLanes']:
+    coordinator = is_coordinator(role, lanes.get(role, {})) or '--coordinator' in args
+    live = [r for r, l in lanes.items() if l.get('state') == 'live' and r != role and not is_coordinator(r, l)]
+    if not coordinator and len(live) >= cfg['maxLanes']:
         raise SystemExit(f"coordinator: {len(live)} lanes live (max {cfg['maxLanes']}): retire one first "
                          f"({', '.join(sorted(live))})")
     if lanes.get(role, {}).get('state') == 'live':
         raise SystemExit(f'coordinator: {role} is already live; use respawn')
+    if not dry:
+        # a session left over from an earlier generation of this role would work beside the new one
+        reaped, alive = reap_lane({'role': role})
+        if reaped:
+            print(f'{role}: killed leftover tmux session(s) {", ".join(reaped)}')
+        if alive:
+            raise SystemExit(f'coordinator: an earlier {role} is still running (pids {alive}); stop it first')
     cmd = worker_command(cfg, role, brief, model)
     handle, how = open_terminal(cfg, role, repo, cmd, dry)
     if dry:
@@ -452,6 +618,8 @@ def cmd_spawn(cfg, args):
     gen = lanes.get(role, {}).get('generation', 0) + 1
     lanes[role] = {'role': role, 'brief': brief, 'repo': repo, 'backend': how, 'handle': handle, 'state': 'live',
                    'started': now(), 'generation': gen, 'model': model or cfg['workerModel']}
+    if coordinator:
+        lanes[role]['kind'] = 'coordinator'
     save_lanes(cfg, lanes)
     print(f'{role}: started (generation {gen}, {how}{" " + handle if handle else ""}) on {brief}')
     return 0
@@ -492,7 +660,8 @@ def cmd_respawn(cfg, args):
     lanes = load_lanes(cfg)
     lane = lanes.get(role)
     if lane and lane.get('state') not in ('closed', 'paused'):
-        close_terminal(cfg, lane, dry)
+        if not close_terminal(cfg, lane, dry) and not dry and reap_lane(lane)[1]:
+            raise SystemExit(f'coordinator: {role} is still running after the close; not starting a successor')
         if not dry:
             lane['state'] = 'closed'
             save_lanes(cfg, lanes)
@@ -556,11 +725,32 @@ def cmd_lanes(cfg, args):
     return 0
 
 
+def reconcile(cfg, lanes, sessions, handles):
+    """Mark closed every live orca lane whose terminal is gone and that no tmux session still runs; returns them."""
+    if handles is None:
+        return []
+    gone = []
+    for role, lane in lanes.items():
+        if (lane.get('state') in ('live', 'retiring') and lane.get('backend') == 'orca' and lane.get('handle')
+                and lane['handle'] not in handles and not lane_sessions(lane, sessions)):
+            lane['state'] = 'closed'
+            lane['retired'] = now()
+            gone.append(role)
+    if gone:
+        save_lanes(cfg, lanes)
+    return gone
+
+
 def cmd_status(cfg, args):
     lanes = load_lanes(cfg)
+    sessions = tmux_sessions()
+    handles = orca_live_handles() if any(l.get('backend') == 'orca' for l in lanes.values()) else None
+    gone = reconcile(cfg, lanes, sessions, handles)
     live = [r for r, l in lanes.items() if l.get('state') in ('live', 'retiring')]
     print(f'# Status {now()}\n')
     print(f"## Lanes ({len(live)} live of max {cfg['maxLanes']})")
+    if gone:
+        print(f"- terminal gone, marked closed: {', '.join(sorted(gone))}")
     for role in sorted(live):
         info = card_info(cfg, role)
         print(f'- **{role}** ({lanes[role]["state"]})' + ('' if info.get('card') else ' -- no lane card yet'))
@@ -574,6 +764,11 @@ def cmd_status(cfg, args):
     safe = [r for r in live if last_word(cfg, r) == 'safe']
     if safe:
         print(f"\n## Safe to close\n- {', '.join(sorted(safe))} (`close-idle`)")
+    orph = orphans(cfg, lanes, sessions, handles)
+    if orph:
+        print('\n## Orphan sessions (still running a retired or replaced lane; `reap` kills them)')
+        for o in orph:
+            print(f"- {o['name']} ({o['role']}, {'attached' if o['attached'] else 'detached'}, pids {o['pids'][:4]})")
     r = bus(cfg, 'digest', '--as', 'coordinator')
     if r is not None and r.stdout.strip():
         print('\n## Coordinator inbox\n' + r.stdout.strip())
@@ -594,6 +789,34 @@ def cmd_close_idle(cfg, args):
     if not dry:
         save_lanes(cfg, lanes)
     print(('would close: ' if dry else 'closed: ') + (', '.join(closed) or 'none'))
+    return 0
+
+
+def cmd_reap(cfg, args):
+    """Kill the orphan sessions `status` lists, or every session of the named lanes."""
+    dry = '--dry-run' in args
+    pos = [a for a in args if not a.startswith('--')]
+    lanes = load_lanes(cfg)
+    sessions = tmux_sessions()
+    if pos:
+        found = []
+        for role in pos:
+            found += lane_sessions(lanes.get(role) or {'role': role}, sessions)
+    else:
+        handles = orca_live_handles() if any(l.get('backend') == 'orca' for l in lanes.values()) else None
+        mine = own_pids()
+        found = [o for o in orphans(cfg, lanes, sessions, handles) if not mine & set(o['pids'])]
+    if not found:
+        print('no orphan sessions')
+        return 0
+    if dry:
+        print('would kill: ' + ', '.join(f"{s['name']} ({s['role']})" for s in found))
+        return 0
+    names, alive = kill_sessions(found)
+    print('killed: ' + (', '.join(names) or 'none'))
+    if alive:
+        print(f"WARNING still running: pids {', '.join(map(str, alive))}")
+        return 1
     return 0
 
 
@@ -1225,7 +1448,7 @@ def cmd_context(cfg, args):
 VERBS = {
     'context': cmd_context,
     'init': cmd_init, 'spawn': cmd_spawn, 'retire': cmd_retire, 'respawn': cmd_respawn, 'lanes': cmd_lanes,
-    'status': cmd_status, 'close-idle': cmd_close_idle, 'ask': cmd_ask, 'questions': cmd_questions,
+    'status': cmd_status, 'close-idle': cmd_close_idle, 'reap': cmd_reap, 'ask': cmd_ask, 'questions': cmd_questions,
     'answer': cmd_answer, 'preflight': cmd_preflight, 'usage': cmd_usage, 'usage-watch': cmd_usage_watch,
     'pause': cmd_pause, 'paused': cmd_paused, 'resume': cmd_resume, 'record-usage': cmd_record_usage,
 }
