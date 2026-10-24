@@ -149,7 +149,8 @@ class BusCliTest(unittest.TestCase):
         b.register('worker-a', handle='h1', kind='claude', mode='file')
         b.register('worker-b', handle='h2', kind='claude', mode='file')
         seen = []
-        with mock.patch.object(deliver.Deliverer, 'nudge_deaf', lambda self, reg=None: seen.append(sorted(reg))), \
+        with mock.patch.object(deliver, 'Deliverer', deliver.Deliverer), \
+                mock.patch.object(deliver.Deliverer, 'nudge_deaf', lambda self, reg=None: seen.append(sorted(reg))), \
                 mock.patch.object(bus, 'import_orca_bus', lambda cfg: None), \
                 mock.patch('orca_bus.cli.main', lambda argv, root=None, default_reply_cmd=None: 0):
             clear = bus.start_heartbeat(self.dir, 'worker-a')
@@ -221,6 +222,86 @@ class BusCliTest(unittest.TestCase):
             code, _ = run(['deliver', '--once'], self.root)
         self.assertEqual(code, 2)
         self.assertIn('backend is "none"', err.getvalue())
+
+    # ---- the nudge reaches an idle worker (orca backend)
+
+    class FakeOrca:
+        def terminals(self):
+            return {}
+
+    def test_tick_nudges_an_idle_worker_whose_mail_was_filed(self):
+        from orca_bus import deliver
+        b = Bus(self.dir)
+        b.register('coordinator', handle='h0', kind='claude', mode='file')
+        b.register('worker-a', handle='h1', kind='claude', mode='file')
+        b.send('coordinator', 'worker-a', 'please rebase')
+        real = time.time()
+        with mock.patch.object(deliver, 'Deliverer', deliver.Deliverer):
+            bus.patch_deliverer(deliver, self.dir)
+            d = deliver.Deliverer(b, self.FakeOrca(), nudge_after=300)
+            d.tick()  # files the normal message into the inbox at once; too young to nudge
+            self.assertFalse([m for m in b.unread('worker-a', ('urgent',)) if m.get('topic') == 'nudge'])
+            with mock.patch.object(deliver.time, 'time', lambda: real + 400):
+                d.tick()  # nothing is queued any more: the nudge must still run
+        nudges = [m for m in b.unread('worker-a', ('urgent',)) if m.get('topic') == 'nudge']
+        self.assertEqual(len(nudges), 1)
+        self.assertIn('please rebase', nudges[0]['text'])
+
+    def test_reply_cmd_never_names_a_bare_python(self):
+        with mock.patch.dict(os.environ, {'AGENT_BUS_PYTHON': ''}):
+            self.assertTrue(bus.reply_cmd().startswith(sys.executable))
+        with mock.patch.dict(os.environ, {'AGENT_BUS_PYTHON': 'python3'}):
+            self.assertTrue(bus.reply_cmd().startswith('python3 "'))
+
+    def test_stale_reply_cmd_is_refreshed(self):
+        cache = self.root / 'cache' / 'agent-bus'
+        for v in ('0.1.2', '0.1.3', '0.1.9'):
+            (cache / v / 'scripts').mkdir(parents=True)
+            (cache / v / 'scripts' / 'bus.py').write_text('')
+        mine = f'{sys.executable} "{(cache / "0.1.3/scripts/bus.py").as_posix()}"'
+        older = f'{sys.executable} "{(cache / "0.1.2/scripts/bus.py").as_posix()}"'
+        newer = f'{sys.executable} "{(cache / "0.1.9/scripts/bus.py").as_posix()}"'
+        no_python = f'python-missing-here "{(cache / "0.1.3/scripts/bus.py").as_posix()}"'
+        self.assertTrue(bus.reply_cmd_stale(older, mine))
+        self.assertTrue(bus.reply_cmd_stale(no_python, mine))
+        self.assertTrue(bus.reply_cmd_stale(f'{sys.executable} "/gone/bus.py"', mine))
+        self.assertTrue(bus.reply_cmd_stale(None, mine))
+        self.assertFalse(bus.reply_cmd_stale(newer, mine))   # another session runs a newer version: no flapping
+        self.assertFalse(bus.reply_cmd_stale('orca-bus', mine))  # hand-written: not ours
+        self.dir.mkdir(parents=True)
+        (self.dir / 'config.json').write_text(json.dumps({'notify': ['coordinator'], 'reply_cmd': 'python "/gone/bus.py"'}))
+        self.assertTrue(bus.refresh_reply_cmd(self.dir))
+        conf = json.loads((self.dir / 'config.json').read_text())
+        self.assertEqual(conf, {'notify': ['coordinator'], 'reply_cmd': bus.reply_cmd()})
+        self.assertFalse(bus.refresh_reply_cmd(self.dir))
+
+    def test_ensure_deliver_starts_one_daemon_per_bus_dir(self):
+        self.dir.mkdir(parents=True)
+        started = []
+        start = lambda argv, log: started.append(argv) or 4242  # noqa: E731
+        orca = {'backend': 'orca'}
+        self.assertIsNone(bus.ensure_deliver(self.dir, {'backend': 'none'}, start=start))
+        self.assertEqual(bus.ensure_deliver(self.dir, orca, start=start), 4242)
+        self.assertEqual(started[0][-3:], ['--dir', str(self.dir), 'deliver'])
+        self.assertIsNone(bus.ensure_deliver(self.dir, orca, start=start))  # a start is in flight: no second one
+        (self.dir / 'deliver.heartbeat').write_text(str(time.time()))
+        later = time.time() + bus.DELIVER_START_LOCK_S + 1
+        self.assertIsNone(bus.ensure_deliver(self.dir, orca, now=later - bus.DELIVER_START_LOCK_S, start=start))
+        # the daemon died: its heartbeat goes stale and the next hook restarts it once the start lock expired
+        self.assertEqual(bus.ensure_deliver(self.dir, orca, now=later + bus.DELIVER_STALE_S, start=start), 4242)
+        self.assertEqual(len(started), 2)
+        (self.dir / 'deliver.STOP').write_text('')
+        self.assertIsNone(bus.ensure_deliver(self.dir, orca, now=later + 999, start=start))  # stopped on purpose
+
+    def test_hook_starts_the_daemon_with_the_orca_backend(self):
+        run(['init'], self.root)
+        calls = []
+        with mock.patch.object(bus, 'ensure_deliver', lambda root, cfg, now=None, start=None: calls.append(root) or 7):
+            _, out = run(['hook', '--event', 'PostToolUse'], self.root, AGENT_BUS_BACKEND='orca')
+            self.assertTrue(json.loads(out)['deliver'])
+            _, out = run(['hook', '--event', 'PostToolUse'], self.root)
+            self.assertNotIn('deliver', json.loads(out))
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == '__main__':
