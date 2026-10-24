@@ -57,10 +57,10 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `spawn <role> [brief] [--model M] [--repo P] [--coordinator] [--dry-run]` | Starts a worker on a brief (default: the resume brief) through the backend. It refuses past `maxLanes`; the coordinator's own lane (role `coordinator`, or `--coordinator`) never counts, so a coordinator can always start its successor. A tmux session still running an earlier generation of the role is killed first. |
 | `retire <role> [--close]` | Asks the worker, by urgent bus mail, to update its card and stop. `--close` also closes its terminal. |
 | `respawn <role>` | Closes the worker and starts a successor on the resume brief. The successor picks up from the card. It refuses if the old worker is still running after the close. |
-| `status` | A report: live lanes with their card's State lines, open questions, safe-to-close lanes, orphan sessions and the coordinator's inbox. An orca lane whose terminal is gone, with nothing left running, is marked closed. |
+| `status` | A report: live lanes with their card's State lines, open questions, safe-to-close lanes, orphan sessions and detached lanes, and the coordinator's inbox. An orca lane whose terminal is gone, with nothing left running, is marked closed. |
 | `lanes [--json]` | Lanes with backend, generation, card age and size, tracker tasks and the last SAFE TO CLOSE / KEEP OPEN. |
 | `close-idle [--dry-run]` | Closes lanes whose last word is SAFE TO CLOSE. |
-| `reap [<role>...] [--dry-run]` | Kills the tmux sessions still running a retired or replaced lane (see below), or every session of the named lanes. |
+| `reap [<role>...] [--dry-run]` | Kills the orphan sessions (a retired or replaced lane, see below), or every session of the named lanes. Never a live lane that is only detached. |
 | `ask "<q>" [--from R] [--options "a\|b"]` | Queues a question for the user. |
 | `questions [--all]` | Lists open questions (or all of them). |
 | `answer <qid> "<a>"` | Records the answer and sends it to the asker on the bus. |
@@ -81,7 +81,9 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `tmux` | `tmux new-window -n <role> -c <repo> -e AGENT_BUS_ROLE=<role>`, in the current session or a detached `coord` session. | `tmux kill-window` |
 | `wt` | A new Windows Terminal tab (`wt -w 0 nt --title <role> -d <repo>`). | You close it. |
 
-**Wrappers that run the agent in their own tmux session** (claude-auto-retry, for one) only attach the terminal to that session, so closing the terminal leaves the agent running, detached, beside its successor. Every close (`retire --close`, `respawn`, `close-idle`, a pause interrupt) therefore also kills the tmux sessions whose environment names the lane (`ORCA_TERMINAL_HANDLE` = its handle, or `AGENT_BUS_ROLE` = its role), then waits for their processes to exit, escalating to SIGTERM and SIGKILL for those pids only. The caller's own session is never touched. `status` lists any session that survived as an orphan; `reap` kills it.
+**Wrappers that run the agent in their own tmux session** (claude-auto-retry, for one) only attach the terminal to that session, so closing the terminal leaves the agent running, detached, beside its successor. Every close (`retire --close`, `respawn`, `close-idle`, a pause interrupt) therefore also kills the tmux sessions whose environment names the lane: `ORCA_TERMINAL_HANDLE` = its handle, or `COORD_LANE` = `<project root>#<role>` (spawn exports it; a session from an older worker without it matches on `AGENT_BUS_ROLE`). Sessions are targeted by id, and their processes are waited for, then sent SIGTERM and SIGKILL, only while each pid's start time is unchanged. The caller's own session is never touched.
+
+`status` lists two kinds of leftover session. An **orphan** provably should not run: its lane is closed or paused, or the lane's live terminal is another one (a successor). A bare `reap` kills orphans. A **detached** lane is live but its terminal is gone (an Orca restart, a tab closed by mistake): its agent may still be working, so it is only listed, with the `tmux attach` command to get it back; `reap <role>` stops it. Coordinator lanes (role `coordinator`, or spawned with `--coordinator`) are skipped by `pause`, `close-idle` and a bare `reap`; only `retire`, `respawn` or `reap <role>` touch them.
 
 The worker command comes from two templates:
 

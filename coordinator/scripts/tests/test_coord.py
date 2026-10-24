@@ -105,6 +105,8 @@ class CoordTest(unittest.TestCase):
         lanes = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())
         self.assertEqual(lanes['coord-gen2']['kind'], 'coordinator')
         self.assertNotIn('kind', lanes['a'])
+        _, out = self.run_cli('status')
+        self.assertIn('## Lanes (1 live of max 6, plus coordinator coord-gen2, coordinator)', out)
 
     def test_spawn_dry_run_builds_backend_commands(self):
         self.run_cli('init')
@@ -429,32 +431,36 @@ class CoordTest(unittest.TestCase):
 
     # ---- tmux sessions that outlive their terminal (claude-auto-retry and similar wrappers)
 
-    def session(self, name, role, handle, pids=(), attached=False):
-        return {'name': name, 'attached': attached, 'role': role, 'handle': handle, 'pids': list(pids)}
+    def session(self, name, role, handle, pids=(), attached=False, lane=None, starts=None):
+        return {'id': '$' + name, 'name': name, 'attached': attached, 'role': role, 'lane': lane, 'handle': handle,
+                'pids': list(pids), 'starts': starts if starts is not None else {p: 'T' for p in pids}}
 
     def fake_tmux(self, calls):
         def run(argv, dry=False, **kw):
             calls.append(argv)
+            if argv[0] == 'ps':  # the real process table: the kill test signals a real child
+                return coord.subprocess.run(argv, capture_output=True, **coord.TEXT)
             if argv[:2] == ['tmux', 'kill-session']:
-                self.sessions = [s for s in self.sessions if s['name'] != argv[-1]]
+                self.sessions = [s for s in self.sessions if s['id'] != argv[-1]]
             return coord.subprocess.CompletedProcess(argv, 0, '{}', '')
         return run
 
     def killed(self, calls):
-        return [c[-1] for c in calls if c[:2] == ['tmux', 'kill-session']]
+        return [c[-1].lstrip('$') for c in calls if c[:2] == ['tmux', 'kill-session']]
 
-    def test_tmux_sessions_reads_role_handle_and_the_process_tree(self):
+    def test_tmux_sessions_reads_role_lane_handle_and_the_process_tree(self):
         outs = {
-            ('tmux', 'list-sessions'): 'claude-retry-1-2\t0\nplain\t1\n',
-            ('tmux', 'show-environment', 'claude-retry-1-2'): 'AGENT_BUS_ROLE=w1\nORCA_TERMINAL_HANDLE=term_a\n-TMUX\n',
-            ('tmux', 'show-environment', 'plain'): 'HOME=/x\n',
-            ('tmux', 'list-panes', 'claude-retry-1-2'): '100\n',
-            ('tmux', 'list-panes', 'plain'): '200\n',
-            ('ps', 'pid=,ppid='): '  100     1\n  101   100\n  102   101\n  200     1\n  300     1\n',
+            ('tmux', 'list-sessions'): '$1\tclaude-retry-1-2\t0\n$2\tplain\t1\n',
+            ('tmux', 'show-environment', '$1'): 'AGENT_BUS_ROLE=w1\nCOORD_LANE=/p#w1\nORCA_TERMINAL_HANDLE=term_a\n-TMUX\n',
+            ('tmux', 'show-environment', '$2'): 'HOME=/x\n',
+            ('tmux', 'list-panes', '$1'): '100\n',
+            ('tmux', 'list-panes', '$2'): '200\n',
+            ('ps', 'pid=,ppid=,lstart='): ('  100     1 Sat Oct 24 22:44:23 2026\n  101   100 Sat Oct 24 22:44:24 2026\n'
+                                           '  102   101 Sat Oct 24 22:44:25 2026\n  200     1 Sat Oct 24 22:00:00 2026\n'),
         }
 
         def run(argv, dry=False, **kw):
-            key = tuple(a for a in argv if not a.startswith('-') and '#' not in a)
+            key = tuple(a for a in argv if not a.startswith('-') and '#{' not in a)
             return coord.subprocess.CompletedProcess(argv, 0, outs.get(key, ''), '')
         self.notmux.stop()
         try:
@@ -462,23 +468,34 @@ class CoordTest(unittest.TestCase):
                 got = coord.tmux_sessions()
         finally:
             self.notmux.start()
-        self.assertEqual(got[0], {'name': 'claude-retry-1-2', 'attached': False, 'role': 'w1', 'handle': 'term_a',
-                                  'pids': [100, 101, 102]})
+        self.assertEqual(got[0]['id'], '$1')
+        self.assertEqual((got[0]['role'], got[0]['lane'], got[0]['handle']), ('w1', '/p#w1', 'term_a'))
+        self.assertEqual(got[0]['pids'], [100, 101, 102])
+        self.assertEqual(got[0]['starts'][102], 'Sat Oct 24 22:44:25 2026')
         self.assertEqual(got[1]['role'], None)
         self.assertTrue(got[1]['attached'])
+
+    def test_worker_env_carries_the_lane_marker(self):
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        self.assertIn(f"COORD_LANE={coord.shlex.quote(coord.lane_key(cfg, 'w1'))} AGENT_BUS_ROLE=w1 claude",
+                      coord.with_env(cfg, 'w1', 'claude'))
 
     def test_close_kills_the_detached_session_of_the_lane_only(self):
         self.run_cli('init')
         cfg = coord.Config(self.root)
-        self.sessions = [self.session('claude-retry-1', 'w1', 'term_a'),          # this lane's terminal
-                         self.session('claude-retry-0', 'w1', 'term_gone'),       # an older generation of w1
-                         self.session('claude-retry-2', 'w2', 'term_b'),          # another lane
-                         self.session('mine', 'w1', 'term_x', [os.getpid()])]     # the caller's own session
+        key = coord.lane_key(cfg, 'w1')
+        self.sessions = [self.session('retry-1', 'w1', 'term_a'),                       # this lane's terminal
+                         self.session('retry-0', 'w1', 'term_gone', lane=key),          # an older generation of w1
+                         self.session('retry-2', 'w2', 'term_b'),                       # another lane
+                         self.session('other-project', 'w1', 'term_c', lane='/elsewhere#w1'),  # same role, other project
+                         self.session('mine', 'w1', 'term_x', [os.getpid()])]           # the caller's own session
         calls = []
         with mock.patch.object(coord, 'run', self.fake_tmux(calls)), redirect_stdout(io.StringIO()):
             self.assertTrue(coord.close_terminal(cfg, {'role': 'w1', 'backend': 'orca', 'handle': 'term_a'}))
         self.assertIn(['orca', 'terminal', 'close', '--terminal', 'term_a', '--tab'], calls)
-        self.assertEqual(sorted(self.killed(calls)), ['claude-retry-0', 'claude-retry-1'])
+        self.assertEqual(sorted(self.killed(calls)), ['retry-0', 'retry-1'])
+        self.assertTrue(all(c[-1].startswith('$') for c in calls if c[:2] == ['tmux', 'kill-session']))  # by id
 
     def test_kill_sessions_signals_survivors_until_they_exit(self):
         import subprocess
@@ -486,31 +503,41 @@ class CoordTest(unittest.TestCase):
         # a process that ignores the hangup tmux sends, like an agent mid tool call
         proc = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(60)'])
         threading.Thread(target=proc.wait, daemon=True).start()  # reap it so it does not linger as a zombie
+        # a pid whose start time changed is a reused pid, now some other process: it is never signalled
+        other = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        threading.Thread(target=other.wait, daemon=True).start()
         calls = []
-        with mock.patch.object(coord, 'run', self.fake_tmux(calls)):
-            names, alive = coord.kill_sessions([self.session('s', 'w1', 'term_a', [proc.pid])], wait_s=0.5)
-        self.assertEqual((names, alive), (['s'], []))
-        self.assertIsNotNone(proc.wait(timeout=5))
+        try:
+            with mock.patch.object(coord, 'run', self.fake_tmux(calls)):
+                start = coord.proc_table()[proc.pid][1]
+                stranger = self.session('x', 'w1', 'term_x', [other.pid], starts={other.pid: 'Mon Jan  1 00:00:00 2001'})
+                names, alive = coord.kill_sessions(
+                    [self.session('s', 'w1', 'term_a', [proc.pid], starts={proc.pid: start}), stranger], wait_s=0.5)
+            self.assertEqual((names, alive), (['s', 'x'], []))
+            self.assertIsNotNone(proc.wait(timeout=5))
+            self.assertIsNone(other.poll())  # untouched
+        finally:
+            other.kill()
 
     def test_respawn_and_spawn_reap_an_earlier_generation(self):
         self.run_cli('init')
         self.run_cli('spawn', 'w1')
-        self.sessions = [self.session('claude-retry-old', 'w1', 'term_old')]
+        self.sessions = [self.session('retry-old', 'w1', 'term_old')]
         calls = []
         with mock.patch.object(coord, 'run', self.fake_tmux(calls)):
             code, out = self.run_cli('respawn', 'w1')
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.killed(calls), ['claude-retry-old'])
+        self.assertEqual(self.killed(calls), ['retry-old'])
         # a lane already marked closed still gets its leftover session reaped before the successor starts
         lanes = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())
         lanes['w1']['state'] = 'closed'
         (self.root / '.claude/coord/lanes/lanes.json').write_text(json.dumps(lanes))
-        self.sessions = [self.session('claude-retry-older', 'w1', 'term_older')]
+        self.sessions = [self.session('retry-older', 'w1', 'term_older')]
         calls = []
         with mock.patch.object(coord, 'run', self.fake_tmux(calls)):
             code, out = self.run_cli('spawn', 'w1')
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.killed(calls), ['claude-retry-older'])
+        self.assertEqual(self.killed(calls), ['retry-older'])
 
     def test_spawn_refuses_while_an_earlier_generation_survives(self):
         self.run_cli('init')
@@ -521,31 +548,66 @@ class CoordTest(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn('still running', out)
 
-    def test_status_reconciles_gone_terminals_and_lists_orphans(self):
+    def test_status_reconciles_and_reap_kills_only_provable_orphans(self):
         self.run_cli('init')
         lanes = {
             'gone': {'role': 'gone', 'backend': 'orca', 'handle': 'term_gone', 'state': 'live'},
             'detached': {'role': 'detached', 'backend': 'orca', 'handle': 'term_d', 'state': 'live'},
             'ok': {'role': 'ok', 'backend': 'orca', 'handle': 'term_ok', 'state': 'live'},
             'retired': {'role': 'retired', 'backend': 'orca', 'handle': 'term_r', 'state': 'closed'},
+            'next': {'role': 'next', 'backend': 'orca', 'handle': 'term_n2', 'state': 'live'},
         }
         (self.root / '.claude/coord/lanes/lanes.json').write_text(json.dumps(lanes))
-        self.sessions = [self.session('s-detached', 'detached', 'term_d'),
+        self.sessions = [self.session('s-detached', 'detached', 'term_d'),     # live lane, tab gone (Orca restart)
                          self.session('s-ok', 'ok', 'term_ok', attached=True),
-                         self.session('s-retired', 'retired', 'term_r')]
-        with mock.patch.object(coord, 'orca_live_handles', lambda dry=False: {'term_ok'}):
+                         self.session('s-retired', 'retired', 'term_r'),       # its lane is closed
+                         self.session('s-old', 'next', 'term_n1'),             # superseded: successor's tab is up
+                         self.session('s-new', 'next', 'term_n2', attached=True)]
+        with mock.patch.object(coord, 'orca_live_handles', lambda dry=False: {'term_ok', 'term_n2'}):
             _, out = self.run_cli('status')
             self.assertIn('marked closed: gone', out)
-            self.assertIn('s-detached (detached, detached', out)
             self.assertIn('s-retired (retired', out)
+            self.assertIn('s-old (next', out)
+            self.assertIn("detached: reattach with `tmux attach -t '=s-detached'`", out)
             self.assertNotIn('s-ok', out)
+            self.assertNotIn('s-new', out)
             saved = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())
             self.assertEqual(saved['gone']['state'], 'closed')
-            self.assertEqual(saved['detached']['state'], 'live')  # still running somewhere: reap, not forget
+            self.assertEqual(saved['detached']['state'], 'live')  # still running somewhere: never forgotten
             calls = []
             with mock.patch.object(coord, 'run', self.fake_tmux(calls)):
-                _, out = self.run_cli('reap')
-        self.assertEqual(sorted(self.killed(calls)), ['s-detached', 's-retired'])
+                self.run_cli('reap')
+            self.assertEqual(sorted(self.killed(calls)), ['s-old', 's-retired'])  # never a live, detached lane
+            calls = []
+            with mock.patch.object(coord, 'run', self.fake_tmux(calls)):
+                self.run_cli('reap', 'detached')  # only by name
+            self.assertEqual(self.killed(calls), ['s-detached'])
+
+    def test_pause_close_idle_and_reap_never_touch_a_coordinator_lane(self):
+        self.run_cli('init')
+        self.run_cli('spawn', 'coord-gen2', '--coordinator')
+        self.run_cli('spawn', 'w1')
+        cards = self.root / '.claude/coord/lanes'
+        (cards / 'coord-gen2.md').write_text('## State\n- steering\n\nSAFE TO CLOSE\n')
+        self.sessions = [self.session('s-coord', 'coord-gen2', 'term_c')]
+        calls = []
+        t0 = 1_000_000.0
+        with mock.patch.object(coord, 'run', self.fake_tmux(calls)):
+            with mock.patch.object(coord, 'clock', lambda: t0):
+                _, out = self.run_cli('pause')
+            self.assertIn('asked 1 lane(s) to checkpoint: w1.', out)
+            with mock.patch.object(coord, 'clock', lambda: t0 + 60 * 60):
+                self.run_cli('pause', '--tick')
+            _, out = self.run_cli('close-idle')
+            self.assertIn('closed: none', out)
+            with mock.patch.object(coord, 'orca_live_handles', lambda dry=False: set()):
+                lanes = json.loads((cards / 'lanes.json').read_text())
+                lanes['coord-gen2']['state'] = 'closed'  # even a closed coordinator lane is not reaped by a bare reap
+                (cards / 'lanes.json').write_text(json.dumps(lanes))
+                self.run_cli('reap')
+        self.assertNotIn('s-coord', self.killed(calls))
+        _, out = self.run_cli('status')
+        self.assertIn('live of max', out)
 
 
 class BusCliTest(unittest.TestCase):
