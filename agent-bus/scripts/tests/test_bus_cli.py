@@ -250,8 +250,20 @@ class BusCliTest(unittest.TestCase):
     def test_reply_cmd_never_names_a_bare_python(self):
         with mock.patch.dict(os.environ, {'AGENT_BUS_PYTHON': ''}):
             self.assertTrue(bus.reply_cmd().startswith(sys.executable))
-        with mock.patch.dict(os.environ, {'AGENT_BUS_PYTHON': 'python3'}):
-            self.assertTrue(bus.reply_cmd().startswith('python3 "'))
+        # the hooks export the python option, default `python`, which may not exist
+        with mock.patch.dict(os.environ, {'AGENT_BUS_PYTHON': 'python-not-installed-here'}):
+            self.assertTrue(bus.reply_cmd().startswith(sys.executable))
+        exe = Path(sys.executable).name
+        with mock.patch.dict(os.environ, {'AGENT_BUS_PYTHON': exe}):
+            import shutil
+            self.assertTrue(bus.reply_cmd().startswith(shutil.which(exe) + ' "'))  # resolved to a full path
+
+    def test_refresh_reply_cmd_survives_a_concurrent_writer(self):
+        self.dir.mkdir(parents=True)
+        (self.dir / 'config.json').write_text(json.dumps({'reply_cmd': 'python "/gone/bus.py"'}))
+        with mock.patch.object(bus.os, 'replace', mock.Mock(side_effect=FileNotFoundError('raced'))):
+            self.assertFalse(bus.refresh_reply_cmd(self.dir))
+        self.assertEqual([p.name for p in self.dir.iterdir()], ['config.json'])  # no temp file left behind
 
     def test_stale_reply_cmd_is_refreshed(self):
         cache = self.root / 'cache' / 'agent-bus'
@@ -277,21 +289,59 @@ class BusCliTest(unittest.TestCase):
 
     def test_ensure_deliver_starts_one_daemon_per_bus_dir(self):
         self.dir.mkdir(parents=True)
-        started = []
-        start = lambda argv, log: started.append(argv) or 4242  # noqa: E731
+        started, live = [], set()
+
+        def start(argv, log):
+            started.append(argv)
+            live.add(4242 + len(started))
+            return 4242 + len(started)
         orca = {'backend': 'orca'}
-        self.assertIsNone(bus.ensure_deliver(self.dir, {'backend': 'none'}, start=start))
-        self.assertEqual(bus.ensure_deliver(self.dir, orca, start=start), 4242)
-        self.assertEqual(started[0][-3:], ['--dir', str(self.dir), 'deliver'])
-        self.assertIsNone(bus.ensure_deliver(self.dir, orca, start=start))  # a start is in flight: no second one
-        (self.dir / 'deliver.heartbeat').write_text(str(time.time()))
-        later = time.time() + bus.DELIVER_START_LOCK_S + 1
-        self.assertIsNone(bus.ensure_deliver(self.dir, orca, now=later - bus.DELIVER_START_LOCK_S, start=start))
-        # the daemon died: its heartbeat goes stale and the next hook restarts it once the start lock expired
-        self.assertEqual(bus.ensure_deliver(self.dir, orca, now=later + bus.DELIVER_STALE_S, start=start), 4242)
-        self.assertEqual(len(started), 2)
-        (self.dir / 'deliver.STOP').write_text('')
-        self.assertIsNone(bus.ensure_deliver(self.dir, orca, now=later + 999, start=start))  # stopped on purpose
+        hb = self.dir / 'deliver.heartbeat'
+        with mock.patch.object(bus, 'pid_is_deliver', lambda pid: pid in live):
+            self.assertIsNone(bus.ensure_deliver(self.dir, {'backend': 'none'}, start=start))
+            self.assertEqual(bus.ensure_deliver(self.dir, orca, start=start), 4243)
+            self.assertEqual(started[0][-3:], ['--dir', str(self.dir), 'deliver'])
+            self.assertEqual(json.loads((self.dir / 'deliver.pid').read_text())['pid'], 4243)
+            self.assertIsNone(bus.ensure_deliver(self.dir, orca, start=start))  # started, no heartbeat yet
+            # a slow tick: the heartbeat is 90 s old but the pid is a live daemon, so no second one
+            hb.write_text('')
+            self.assertIsNone(bus.ensure_deliver(self.dir, orca, now=time.time() + 90, start=start))
+            # another session holds the start lock: no waiting, no start
+            import fcntl
+            with open(self.dir / 'deliver.lock', 'a+') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                live.clear()
+                self.assertIsNone(bus.ensure_deliver(self.dir, orca, now=time.time() + 90, start=start))
+            # the daemon died: the next hook starts one
+            self.assertEqual(bus.ensure_deliver(self.dir, orca, now=time.time() + 90, start=start), 4244)
+            # hung (pid alive, no tick for DELIVER_HUNG_S): stopped and replaced
+            killed = []
+            with mock.patch.object(bus.os, 'kill', lambda pid, sig: killed.append(pid)):
+                self.assertEqual(bus.ensure_deliver(self.dir, orca, now=time.time() + bus.DELIVER_HUNG_S + 1,
+                                                    start=start), 4245)
+            self.assertEqual(killed, [4244])
+            (self.dir / 'deliver.STOP').write_text('')
+            live.clear()
+            self.assertIsNone(bus.ensure_deliver(self.dir, orca, now=time.time() + 999, start=start))  # stopped on purpose
+        self.assertEqual(len(started), 3)
+
+    def test_deliver_refuses_beside_a_running_daemon(self):
+        run(['init'], self.root)
+        (self.dir / 'deliver.pid').write_text(json.dumps({'pid': 4242}))
+        err = io.StringIO()
+        from orca_bus import deliver
+        with mock.patch.object(deliver, 'Deliverer', deliver.Deliverer), \
+                mock.patch.object(bus, 'pid_is_deliver', lambda pid: pid == 4242), redirect_stderr(err), \
+                mock.patch('orca_bus.cli.main', lambda argv, root=None, default_reply_cmd=None: 0):  # never a real loop
+            code, _ = run(['deliver'], self.root, AGENT_BUS_BACKEND='orca')
+        self.assertEqual(code, 1)
+        self.assertIn('already runs', err.getvalue())
+
+    def test_pid_is_deliver_rejects_dead_and_foreign_pids(self):
+        self.assertFalse(bus.pid_is_deliver(os.getpid()))  # alive, but not a deliver daemon
+        p = subprocess.Popen([sys.executable, '-c', 'pass'])
+        p.wait()
+        self.assertFalse(bus.pid_is_deliver(p.pid))
 
     def test_hook_starts_the_daemon_with_the_orca_backend(self):
         run(['init'], self.root)

@@ -72,7 +72,7 @@ The agent itself uses the CLI that its session context names: `python "<plugin>/
 | `register <role> --kind claude --mode file [--handle H]` | Joins the bus. |
 | `chat [--detach\|--status\|--stop] [--port N] [--bind A]` | The web chat. |
 | `tui [--open] [--as R] [--theme T]` | The terminal client. |
-| `deliver` | The typing daemon. It needs the orca backend. Every session's hook starts it in the background when no live one has a fresh heartbeat (`deliver.heartbeat`, stale after 60 s); output goes to `deliver.out` and `deliver.log` in the bus dir. Create `deliver.STOP` there to stop it and keep it stopped. |
+| `deliver` | The typing daemon. It needs the orca backend. Every session's hook starts it in the background unless the pid in `deliver.pid` is a running daemon (one per bus dir, under a start lock); one that has not ticked for 10 minutes is stopped and replaced. Output goes to `deliver.out` and `deliver.log` in the bus dir. Create `deliver.STOP` there to stop it and keep it stopped. |
 | `whoami`, `watch-live` | Diagnostics. |
 
 **Who is notified:**
@@ -293,8 +293,6 @@ Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`
 | `python` | `python` | The interpreter. |
 | `backend` | `none` | `orca` lets the deliver daemon type urgent mail and nudges into Orca tabs. `none` never types. |
 | `nudgeAfter` | `300` | Seconds of unread mail before the daemon's one nudge (orca backend). |
-
-The bus's `config.json` holds `reply_cmd`, the command printed in every reply hint, nudge and watch line. `init` writes this CLI's own (the `python` option, else the interpreter running it, and the versioned script path), and each session's start and stop hooks replace it when its python or script is missing or it names an older plugin version.
 | `monitor` | `on` | `off` stops the "arm a Monitor" requests. |
 | `chatPort` | `8790` | The web chat port. |
 | `chatBind` | `127.0.0.1` | `127.0.0.1`, `localhost` or `::1`. Loopback only. |
@@ -302,6 +300,8 @@ The bus's `config.json` holds `reply_cmd`, the command printed in every reply hi
 | `taskPrefix` | `TASK` | Task ids with this prefix (`TASK-12`) become task chips in the chat. |
 | `band` | `on` | `off` hides the unread band above the prompt. |
 | `theme` | `tokyonight` | The `/bus` pane's colors: `tokyonight` or `claude`. |
+
+The bus's `config.json` holds `reply_cmd`, the command printed in every reply hint, nudge and watch line. `init` writes this CLI's own (the `python` option resolved to a full path, else the interpreter running it, and the versioned script path), and each session's start and stop hooks replace it when its python or script is missing or it names an older plugin version.
 
 **Roles:** a session's role is resolved in this order:
 

@@ -31,6 +31,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -276,9 +277,12 @@ def tui_verb(argv, cfg, root):
 
 
 def reply_cmd():
-    """The command other sessions run to reach this CLI: the configured python (else this interpreter, never a bare
-    `python`, which many systems lack) and this script's own, versioned, path."""
-    py = os.environ.get('AGENT_BUS_PYTHON') or sys.executable or 'python3'
+    """The command other sessions run to reach this CLI: the configured python resolved to its full path (else this
+    interpreter; never a bare `python`, which many systems lack) and this script's own, versioned, path."""
+    import shutil
+    # the hooks always export AGENT_BUS_PYTHON (default `python`): resolve it, and fall back when it is not there
+    want = os.environ.get('AGENT_BUS_PYTHON')
+    py = (shutil.which(want) if want else None) or sys.executable or 'python3'
     if ' ' in py:
         py = f'"{py}"'
     return f'{py} "{Path(__file__).resolve().as_posix()}"'
@@ -327,48 +331,116 @@ def refresh_reply_cmd(root):
     if not isinstance(conf, dict) or not reply_cmd_stale(conf.get('reply_cmd'), want):
         return False
     conf['reply_cmd'] = want
-    tmp = p.with_suffix('.tmp')
-    tmp.write_text(json.dumps(conf, indent=1), encoding='utf-8')
-    os.replace(tmp, p)
+    tmp = p.with_name(f'config.{os.getpid()}.tmp')  # many sessions' hooks may refresh at once after an upgrade
+    try:
+        tmp.write_text(json.dumps(conf, indent=1), encoding='utf-8')
+        os.replace(tmp, p)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return False
     return True
 
 
 # ---- the deliver daemon: started by the hook when the backend is orca
+#
+# One daemon per bus dir. It is alive while the pid in deliver.pid is a running deliver process; the heartbeat only
+# tells a hung daemon (no tick for DELIVER_HUNG_S) from a slow one, since one tick can wait 60 s on each orca call.
 
-DELIVER_START_LOCK_S = 30   # one start attempt per bus dir in this window
+DELIVER_HUNG_S = 600
 
 
-def deliver_alive(root, now=None):
+def pid_is_deliver(pid):
+    """True when `pid` is a running deliver daemon (not a dead pid, nor a reuse of it by another program)."""
+    import subprocess
     try:
-        return (now or time.time()) - (Path(root) / 'deliver.heartbeat').stat().st_mtime < DELIVER_STALE_S
+        os.kill(pid, 0)
+    except PermissionError:
+        pass
     except OSError:
         return False
+    if os.name == 'nt':
+        return True
+    r = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, **TEXT)
+    return ' deliver' in r.stdout
+
+
+def deliver_pid(root):
+    try:
+        pid = int(json.loads((Path(root) / 'deliver.pid').read_text(encoding='utf-8'))['pid'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return pid if pid_is_deliver(pid) else None
+
+
+def deliver_state(root, now=None):
+    """'running', 'hung' (its pid lives but it has not ticked for DELIVER_HUNG_S) or None."""
+    pid = deliver_pid(root)
+    if not pid:
+        return None
+    try:
+        age = (now or time.time()) - (Path(root) / 'deliver.heartbeat').stat().st_mtime
+    except OSError:
+        return 'running'  # started, first tick not written yet
+    return 'hung' if age > DELIVER_HUNG_S else 'running'
+
+
+@contextmanager
+def start_lock(root):
+    """Yields True to the one caller holding the bus dir's deliver start lock, False to the others (no waiting)."""
+    path = Path(root) / 'deliver.lock'
+    f = open(path, 'a+')
+    try:
+        try:
+            import fcntl
+        except ImportError:  # Windows
+            import msvcrt
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                yield False
+                return
+            yield True
+            return
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        f.close()  # closing releases the lock
 
 
 def ensure_deliver(root, cfg, now=None, start=None):
-    """Start the deliver daemon for this bus dir unless one is alive. One daemon per bus dir: its own pid and
-    heartbeat files guard it, and an O_EXCL start lock keeps sessions that hook at the same moment from starting
-    two. Returns the pid it started, else None."""
+    """Start the deliver daemon for this bus dir unless one is running; a hung one is stopped and replaced.
+    Sessions that hook at the same moment are serialised by the start lock, and the new pid is written to
+    deliver.pid before the lock is released. Returns the pid it started, else None."""
     import shutil
-    if cfg['backend'] != 'orca' or deliver_alive(root, now) or Path(root, 'deliver.STOP').exists():
+    if cfg['backend'] != 'orca' or Path(root, 'deliver.STOP').exists():
         return None
     if start is None and not shutil.which('orca'):
         return None
-    lock = Path(root) / 'deliver.starting'
-    now = now or time.time()
-    try:
-        if now - lock.stat().st_mtime < DELIVER_START_LOCK_S:
+    try:  # the cheap path every hook takes while a daemon ticks: no process lookup, no lock
+        if (now or time.time()) - (Path(root) / 'deliver.heartbeat').stat().st_mtime < DELIVER_STALE_S:
             return None
-        lock.unlink()
     except OSError:
         pass
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except OSError:
-        return None  # another session won the race
-    os.close(fd)
-    argv = [sys.executable, str(Path(__file__).resolve()), '--dir', str(root), 'deliver']
-    return (start or detach)(argv, Path(root) / 'deliver.out')
+    with start_lock(root) as mine:
+        if not mine:
+            return None
+        state = deliver_state(root, now)
+        if state == 'running':
+            return None
+        if state == 'hung':
+            import signal
+            try:
+                os.kill(deliver_pid(root), signal.SIGTERM)
+            except (OSError, TypeError):
+                pass
+        argv = [sys.executable, str(Path(__file__).resolve()), '--dir', str(root), 'deliver']
+        pid = (start or detach)(argv, Path(root) / 'deliver.out')
+        (Path(root) / 'deliver.pid').write_text(json.dumps({'pid': pid, 'started': now or time.time()}))
+        return pid
 
 
 def resolve_role(bus, explicit=None):
@@ -663,7 +735,7 @@ def main(argv=None):
         if event in ('SessionStart', 'Stop'):
             refresh_reply_cmd(root)  # a stale command in config.json reaches every nudge, watch and reply line
         if cfg['backend'] == 'orca':
-            out['deliver'] = bool(ensure_deliver(root, cfg)) or deliver_alive(root)
+            out['deliver'] = bool(ensure_deliver(root, cfg)) or deliver_state(root) == 'running'
         if role:
             entry = bus.registry().get(role) or {}
             out['registered'] = bool(entry)
@@ -702,6 +774,10 @@ def main(argv=None):
             print('agent-bus: the deliver daemon types into Orca terminals; backend is "none", so mail is served by '
                   'the hook and the watch alone. Set the backend option to orca to run it.', file=sys.stderr)
             return 2
+        other = deliver_pid(root)
+        if other and other != os.getpid() and '--once' not in argv:
+            print(f'agent-bus: a deliver daemon (pid {other}) already runs for {root}', file=sys.stderr)
+            return 1
         from orca_bus import deliver
         patch_deliverer(deliver, root)
         if '--nudge-after' not in argv:
