@@ -17,7 +17,18 @@ sys.path.insert(0, str(SCRIPTS.parent / 'vendor'))
 import bus  # noqa: E402
 from orca_bus.store import Bus  # noqa: E402
 
-CLEAN = {k: '' for k in list(bus.ENV.values()) + ['AGENT_BUS_ROLE', 'ORCA_BUS_NAME', 'ORCA_TERMINAL_HANDLE']}
+CLEAN = {k: '' for k in list(bus.ENV.values()) + ['AGENT_BUS_ROLE', 'ORCA_BUS_NAME', 'ORCA_TERMINAL_HANDLE',
+                                                   'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID']}
+# Tests never touch the real machine-wide channel: every run gets a throwaway global dir and no piforge.
+_GLOBAL_TMP = tempfile.mkdtemp(prefix='agent-bus-global-test-')
+CLEAN['AGENT_BUS_GLOBAL_DIR'] = str(Path(_GLOBAL_TMP) / 'g')
+CLEAN['AGENT_BUS_PAUSE_PIFORGE'] = 'off'
+# ...and if a test turns the piforge link on, it reaches this stub, which only records its arguments.
+PIFORGE_STUB = Path(_GLOBAL_TMP) / 'piforge-stub'
+PIFORGE_CALLS = Path(_GLOBAL_TMP) / 'piforge-calls.txt'
+PIFORGE_STUB.write_text(f'#!/bin/sh\necho "$@" >> "{PIFORGE_CALLS}"\n')
+PIFORGE_STUB.chmod(0o755)
+CLEAN['AGENT_BUS_PIFORGE_BIN'] = str(PIFORGE_STUB)
 
 
 def run(argv, cwd, **env):

@@ -12,6 +12,11 @@
     python bus.py chat [--detach|--status|--stop]        the localhost web chat (prints its URL)
     python bus.py tui [--open] [--as ROLE] [--theme T]   the terminal client (Textual); --open: in a new terminal
     python bus.py snapshot [--since CURSOR] [--as user]  JSON for the /bus pane (messages, roles, health, cursor)
+    python bus.py broadcast "<text>" [--to all|coordinators] [--prio urgent|normal|fyi] [--from NAME]
+                                                         one message to every agent-bus session on this machine
+    python bus.py broadcast --pause "<reason>" | --resume ["<note>"] [--no-piforge]
+                                                         a global pause/resume (kept in pause.json; may freeze piforge)
+    python bus.py global status|log [--n N]              the global pause state, or the last N global messages
     every other orca-bus verb passes through: register, who, status, react, thread, sub, pin, edit, delete, ...
 
 Configuration (first match wins): flags > <project>/.claude/claude-mods.json "agent-bus" > environment
@@ -25,6 +30,13 @@ Configuration (first match wins): flags > <project>/.claude/claude-mods.json "ag
     AGENT_BUS_CHAT_PORT / AGENT_BUS_CHAT_BIND   web chat port (8790) and bind address (127.0.0.1)
     AGENT_BUS_TASKS_DB               optional task-tracker db shown in the chat's lane list
     AGENT_BUS_TASK_PREFIX            the tracker's id prefix, linked as task chips in the chat (default TASK)
+    AGENT_BUS_GLOBAL                 on | off: read and send the machine-wide global channel (default on)
+    AGENT_BUS_GLOBAL_DIR             the global channel's directory (default ~/.claude/agent-bus-global)
+    AGENT_BUS_GLOBAL_MAX_CHARS       longest global message (default 1000)
+    AGENT_BUS_GLOBAL_RATE            broadcasts per sender: count/seconds, or off (default 5/60)
+    AGENT_BUS_PAUSE_PIFORGE          auto | on | off: a global pause also runs `piforge pause --reason` (auto: when
+                                     piforge is on PATH)
+    AGENT_BUS_PIFORGE_BIN            the piforge client to run for that (default piforge)
 """
 import json
 import os
@@ -33,6 +45,9 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import global_bus  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 WATCH_BEAT_S = 30       # the watch writes its heartbeat this often
@@ -46,11 +61,20 @@ DEFAULTS = {
     'chatBind': '127.0.0.1',
     'tasksDb': '',
     'roles': 'coordinator',
+    'global': 'on',
+    'globalDir': '',
+    'globalMaxChars': 1000,
+    'globalRate': '5/60',
+    'pausePiforge': 'auto',
+    'piforgeBin': 'piforge',
 }
 ENV = {
     'dir': 'AGENT_BUS_DIR', 'orcaBusPath': 'AGENT_BUS_ORCA_BUS_PATH', 'backend': 'AGENT_BUS_BACKEND',
     'nudgeAfter': 'AGENT_BUS_NUDGE_AFTER', 'chatPort': 'AGENT_BUS_CHAT_PORT', 'chatBind': 'AGENT_BUS_CHAT_BIND',
     'tasksDb': 'AGENT_BUS_TASKS_DB', 'roles': 'AGENT_BUS_ROLES',
+    'global': 'AGENT_BUS_GLOBAL', 'globalDir': 'AGENT_BUS_GLOBAL_DIR', 'globalMaxChars': 'AGENT_BUS_GLOBAL_MAX_CHARS',
+    'globalRate': 'AGENT_BUS_GLOBAL_RATE', 'pausePiforge': 'AGENT_BUS_PAUSE_PIFORGE',
+    'piforgeBin': 'AGENT_BUS_PIFORGE_BIN',
 }
 
 
@@ -107,7 +131,115 @@ def load_config(flags=None, root=None):
     cfg['chatPort'] = int(cfg['chatPort'])
     if cfg['backend'] not in ('orca', 'none'):
         raise SystemExit(f"agent-bus: backend must be orca or none, not {cfg['backend']!r}")
+    cfg['global'] = str(cfg['global']).lower() not in ('off', 'false', '0', 'no')
+    cfg['globalDir'] = str(Path(os.path.expanduser(cfg['globalDir'] or global_bus.default_dir())))
+    cfg['globalMaxChars'] = int(cfg['globalMaxChars'])
+    cfg['project'] = root.name
+    cfg['root'] = str(root)
     return cfg
+
+
+def open_global(cfg):
+    return global_bus.GlobalBus(cfg['globalDir'], cfg['globalMaxChars'], cfg['globalRate'])
+
+
+def session_key(cfg, role, session=None):
+    """Whose global cursor this is: the Claude session id when the mod passes it, else project + role."""
+    session = session or os.environ.get('CLAUDE_SESSION_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
+    return f'session:{session}' if session else f"{cfg['root']}|{role or '-'}"
+
+
+def global_hook_text(cfg, role, session=None):
+    """New global messages for this session, rendered for the hook (None when nothing new or the channel is off)."""
+    if not cfg['global']:
+        return None
+    g = open_global(cfg)
+    msgs, first = g.take_new(session_key(cfg, role, session), cfg['project'], role)
+    return global_bus.served_text(msgs, g.pause_state(), first)
+
+
+def join_text(*parts):
+    parts = [p for p in parts if p]
+    return '\n\n'.join(parts) if parts else None
+
+
+def env_role():
+    return os.environ.get('AGENT_BUS_ROLE') or os.environ.get('ORCA_BUS_NAME') or None
+
+
+def broadcast_verb(argv, cfg, role):
+    if not cfg['global']:
+        print('agent-bus: the global channel is off (AGENT_BUS_GLOBAL=off)', file=sys.stderr)
+        return 2
+    g = open_global(cfg)
+    if argv[:1] == ['--status'] or argv[:1] == ['status']:
+        return global_verb(['status'], cfg)
+    frm = take(argv, '--from') or role or 'user'
+    to = take(argv, '--to') or 'all'
+    prio = take(argv, '--prio') or 'urgent'
+    if prio not in ('urgent', 'normal', 'fyi'):
+        print('agent-bus: --prio must be urgent, normal or fyi', file=sys.stderr)
+        return 2
+    no_piforge = '--no-piforge' in argv
+    argv = [a for a in argv if a != '--no-piforge']
+    kind = 'msg'
+    for flag, k in (('--pause', 'pause'), ('--resume', 'resume')):
+        if flag in argv:
+            kind = k
+            argv.remove(flag)
+    text = ' '.join(argv)
+    if kind == 'pause' and not text.strip():
+        print('agent-bus: a pause needs a reason: broadcast --pause "<reason>"', file=sys.stderr)
+        return 2
+    if kind != 'msg':
+        prio = 'urgent'
+    try:
+        m = g.broadcast(text, cfg['project'], frm, kind=kind, to=to, prio=prio)
+    except global_bus.GlobalError as ex:
+        print(f'agent-bus: {ex}', file=sys.stderr)
+        return 2
+    print(f"broadcast {m['id']} {kind} -> {to} [{prio}] ({g.log})")
+    if kind != 'msg' and not no_piforge and global_bus.piforge_wanted(cfg['pausePiforge'], cfg['piforgeBin']):
+        print(global_bus.run_piforge(kind, m['text'], cfg['piforgeBin']))
+    return 0
+
+
+def global_verb(argv, cfg):
+    g = open_global(cfg)
+    sub = argv[0] if argv else 'status'
+    if sub == 'status':
+        st = g.pause_state()
+        print(global_bus.pause_line(st) or f'global bus: not paused ({g.root})')
+        return 0
+    if sub == 'log':
+        n = int(take(argv, '--n') or 20)
+        for m in g.messages()[-n:]:
+            print(time.strftime('%m-%d %H:%M', time.localtime(float(m.get('ts', 0)))), global_bus.line(m))
+        return 0
+    print('agent-bus: global status | global log [--n N]', file=sys.stderr)
+    return 2
+
+
+def global_watch_thread(cfg, role, out_lock):
+    """Inside `bus watch`: print one line per new global message for this role, so an idle agent wakes."""
+    g = open_global(cfg)
+    pos = g.size()
+
+    def loop():
+        nonlocal pos
+        while True:
+            time.sleep(2)
+            if g.size() < pos:
+                pos = 0
+            msgs, pos = g.read_from(pos)
+            for m in msgs:
+                if g.for_me(m, cfg['project'], role) and g.wakes(m):
+                    with out_lock:
+                        print(global_bus.line(m), flush=True)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
 
 
 VENDOR = HERE.parent / 'vendor'
@@ -688,8 +820,19 @@ def main(argv=None):
             except (AttributeError, ValueError):
                 pass
         return snapshot_verb(argv[1:], cfg['dir'])
+    if verb == 'global':
+        return global_verb(argv[1:], cfg)
+    if verb == 'broadcast' and not Path(cfg['dir']).is_dir():
+        return broadcast_verb(argv[1:], cfg, env_role())
     if verb == 'hook' and not Path(cfg['dir']).is_dir():
-        print(json.dumps({'bus': False, 'dir': cfg['dir']}))  # no bus in this project: stay out of the way
+        # No bus in this project: stay out of the way, except for the machine-wide global channel.
+        take(argv, '--event')
+        role = take(argv, '--as') or env_role()
+        out = {'bus': False, 'dir': cfg['dir'], 'role': role,
+               'text': global_hook_text(cfg, role, take(argv, '--session'))}
+        if cfg['global']:
+            out['globalLog'] = str(Path(cfg['globalDir'], 'global.jsonl').as_posix())
+        print(json.dumps(out))
         return 0
     import_orca_bus(cfg)
     from orca_bus.store import Bus, BusError
@@ -727,9 +870,13 @@ def main(argv=None):
         print('live' if live else 'none')
         return 0 if live else 1
 
+    if verb == 'broadcast':
+        return broadcast_verb(argv[1:], cfg, resolve_role(bus))
+
     if verb == 'hook':
         event = take(argv, '--event') or 'PostToolUse'
         role = resolve_role(bus, take(argv, '--as'))
+        session = take(argv, '--session')
         out = {'bus': True, 'dir': str(Path(root).resolve().as_posix()), 'role': role, 'text': None,
                'watch': False, 'registered': False, 'cli': reply_cmd()}
         if event in ('SessionStart', 'Stop'):
@@ -742,6 +889,9 @@ def main(argv=None):
             out['watch'] = watch_live(root, role)
             if entry.get('mode', 'file') == 'file':
                 out['text'] = serve(bus, role, event, line_v2)
+        out['text'] = join_text(global_hook_text(cfg, role, session), out['text'])
+        if cfg['global']:
+            out['globalLog'] = str(Path(cfg['globalDir'], 'global.jsonl').as_posix())
         print(json.dumps(out))
         return 0
 
@@ -762,6 +912,8 @@ def main(argv=None):
             timer = threading.Timer(float(limit), expire)
             timer.daemon = True
             timer.start()
+        if cfg['global']:
+            global_watch_thread(cfg, role, threading.Lock())
         try:
             return orca_main(['watch', '--as', role] + argv[1:], root=root, default_reply_cmd=reply_cmd())
         except KeyboardInterrupt:

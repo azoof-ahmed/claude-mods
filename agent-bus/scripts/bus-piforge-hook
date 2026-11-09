@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""bus-piforge-hook: piforge's on_pause / on_resume hook -> a global agent-bus pause / resume.
+
+In piforged.toml:   [hooks]  on_pause = "bus-piforge-hook pause"   on_resume = "bus-piforge-hook resume"
+piforge passes the reason in PIFORGE_REASON. The broadcast comes from piforge/piforge and never calls piforge back
+(a pause that started in piforge must not loop). Reads AGENT_BUS_GLOBAL_DIR, AGENT_BUS_GLOBAL_MAX_CHARS and
+AGENT_BUS_GLOBAL_RATE like bus.py; AGENT_BUS_GLOBAL=off makes it a no-op.
+"""
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import global_bus  # noqa: E402
+
+
+def main(argv):
+    kind = (argv[0] if argv else os.environ.get('PIFORGE_EVENT', '')).lower().replace('on_', '')
+    if kind not in ('pause', 'resume'):
+        print('usage: bus-piforge-hook pause|resume   (reason in PIFORGE_REASON)', file=sys.stderr)
+        return 2
+    if os.environ.get('AGENT_BUS_GLOBAL', 'on').lower() in ('off', 'false', '0', 'no'):
+        return 0
+    reason = os.environ.get('PIFORGE_REASON', '').strip()
+    if kind == 'pause':
+        reason = 'piforge queue frozen: ' + (reason or 'no reason given')
+    g = global_bus.GlobalBus(os.path.expanduser(os.environ.get('AGENT_BUS_GLOBAL_DIR') or global_bus.default_dir()),
+                             os.environ.get('AGENT_BUS_GLOBAL_MAX_CHARS') or 1000,
+                             os.environ.get('AGENT_BUS_GLOBAL_RATE') or '5/60')
+    try:
+        m = g.broadcast(reason[:g.max_chars], 'piforge', 'piforge', kind=kind)
+    except global_bus.GlobalError as ex:
+        print(f'bus-piforge-hook: {ex}', file=sys.stderr)
+        return 1
+    print(f"broadcast {m['id']} {kind} ({g.log})")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

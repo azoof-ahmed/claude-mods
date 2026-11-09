@@ -57,6 +57,25 @@ test('session start adds nothing in a project without a bus', async ($, on) => {
   expect(r.additionalContext ?? []).toEqual([])
 })
 
+test('session start in a project without a bus still shows a global pause in force', async ($, on) => {
+  const runs = answerHook(on, { bus: false, text: '[GLOBAL PAUSE in force since 2026-11-09 10:00, by a/coordinator] hot' })
+  const r = await $.classic.SessionStart({ source: 'startup', session_id: 'sess-1' } as never)
+  expect((r.additionalContext ?? []).join('\n')).toContain('GLOBAL PAUSE in force')
+  expect(runs[0]).toContain('--session')
+  expect(runs[0]).toContain('sess-1')
+})
+
+test('an agent without a bus about to idle is kept going once with a global message', async ($, on) => {
+  answerHook(on, { bus: false, text: '[GLOBAL from a/coordinator g1] stop' })
+  const r = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(r.block).toContain('[GLOBAL from a/coordinator g1] stop')
+})
+
+test('/bus broadcast and /bus global reach the CLI', async () => {
+  expect(busArgs('broadcast --pause hot board')).toEqual(['broadcast', '--pause', 'hot', 'board'])
+  expect(busArgs('global status')).toEqual(['global', 'status'])
+})
+
 test('new mail is handed to the model after a tool call', async ($, on) => {
   answerHook(on, { ...BASE, watch: true, text: 'Bus mail for worker-a (1 new): [bus m1 from coordinator] go' })
   const r = await $.classic.PostToolUse(POST_TOOL)

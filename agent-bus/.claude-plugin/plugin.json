@@ -1,7 +1,7 @@
 {
   "name": "agent-bus",
-  "version": "0.1.4",
-  "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca terminals, a /bus chat pane, an unread band and a localhost web chat show it all. Built on orca-bus.",
+  "version": "0.1.5",
+  "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca terminals, a /bus chat pane, an unread band and a localhost web chat show it all. A machine-wide global channel reaches every session, with a global pause/resume. Built on orca-bus.",
   "author": {
     "name": "Azoof Ahmed"
   },
@@ -112,6 +112,51 @@
         "tokyonight",
         "claude"
       ]
+    },
+    "global": {
+      "type": "string",
+      "title": "Global channel",
+      "description": "on: this session reads the machine-wide global channel (broadcasts and global pause/resume from any project) and may broadcast. off: neither.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "globalDir": {
+      "type": "string",
+      "title": "Global channel directory",
+      "description": "Where the global channel lives. Empty: ~/.claude/agent-bus-global. Every session on the machine must use the same one.",
+      "default": ""
+    },
+    "globalMaxChars": {
+      "type": "number",
+      "title": "Longest global message",
+      "description": "Characters a broadcast may have.",
+      "default": 1000
+    },
+    "globalRate": {
+      "type": "string",
+      "title": "Broadcast rate limit",
+      "description": "Broadcasts one sender (project/role) may make: count/seconds, or off.",
+      "default": "5/60"
+    },
+    "pausePiforge": {
+      "type": "string",
+      "title": "Global pause freezes piforge",
+      "description": "on: `broadcast --pause` also runs `piforge pause --reason`, and `--resume` runs `piforge resume`. auto: only when piforge is on PATH. off: never.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "on",
+        "off"
+      ]
+    },
+    "piforgeBin": {
+      "type": "string",
+      "title": "piforge client",
+      "description": "The piforge command the global pause runs.",
+      "default": "piforge"
     }
   }
 }
