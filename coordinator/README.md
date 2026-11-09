@@ -138,6 +138,7 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
   - in the coordinator session, at `pauseWeeklyPercent` of the weekly window, it adds a "start the graceful pause"
     note and a toast, once per crossing;
   - in every session, at `pauseSessionPercent` of the 5-hour window, it adds a checkpoint-and-pause notice.
+- **Coordinator succession:** past `retireTokens` the coordinator session is told to hand over on its own: write its card, `coord succeed` (a fresh `coordinator` session starts on `COORDINATOR_RESUME.md`; the old lane becomes `coordinator-prev`), `coord handed-over`, and end with SAFE TO CLOSE. The successor runs `coord close-predecessor`, which closes the old terminal only after that last word. Old projects get the brief on `succeed`.
 - **The status line** shows `coord: N/M lanes, Q question(s)` in the coordinator session. A session that started before the project was set up re-reads the context every 5 tool calls, so the line (and the start-up lines) appear without a restart.
 
 ## Usage watcher and graceful pause

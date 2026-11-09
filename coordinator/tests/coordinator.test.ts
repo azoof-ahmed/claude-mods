@@ -133,3 +133,11 @@ test('a project coordinated after the session started gets the status line witho
   }
   expect(statuses.at(-1)).toBe('coord: 1/6 lanes, 3 question(s)')
 })
+
+test('a coordinator past the threshold is told to hand over by itself', async () => {
+  const r = retireReminder(260000, 250000, 0, true)
+  expect(r?.text).toContain('coord succeed')
+  expect(r?.text).toContain('coord handed-over')
+  expect(r?.text).toContain('SAFE TO CLOSE')
+  expect(retireReminder(260000, 250000, 0)?.text).not.toContain('coord succeed')
+})

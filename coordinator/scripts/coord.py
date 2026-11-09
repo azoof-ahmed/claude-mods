@@ -4,6 +4,9 @@
     python coord.py spawn <role> [<brief>] [--repo P] [--model M] [--coordinator] [--dry-run]
                                                         start a worker on a brief (default: the resume brief);
                                                         --coordinator (or role `coordinator`) skips maxLanes
+    python coord.py succeed [--model M] [--dry-run]     (the coordinator) start the successor coordinator on its card
+    python coord.py handed-over                         (the old coordinator) say SAFE TO CLOSE after `succeed`
+    python coord.py close-predecessor [--wait S]        (the successor) close the old coordinator once it said SAFE TO CLOSE
     python coord.py retire <role> [--close]             ask a worker to update its card and stop; --close its terminal
     python coord.py respawn <role> [--dry-run]          close the worker and start a successor on its lane card
     python coord.py lanes [--json]                      the lanes, their terminals, cards and tasks
@@ -761,6 +764,7 @@ def cmd_init(cfg, args):
         TEMPLATES / 'briefs' / 'TEMPLATE.md': cfg.path('briefsDir') / 'TEMPLATE.md',
         TEMPLATES / 'briefs' / 'RESUME.md': cfg.path('briefsDir') / 'RESUME.md',
         TEMPLATES / 'briefs' / 'scheduler.md': cfg.path('briefsDir') / 'scheduler.md',
+        TEMPLATES / 'briefs' / 'COORDINATOR_RESUME.md': cfg.path('briefsDir') / 'COORDINATOR_RESUME.md',
         TEMPLATES / 'HANDOFF_PROTOCOL.md': cfg.path('briefsDir') / 'HANDOFF_PROTOCOL.md',
     }
     for src, dst in targets.items():
@@ -864,6 +868,93 @@ def cmd_retire(cfg, args):
     lane['retired'] = now()
     save_lanes(cfg, lanes)
     print(f'{role}: {lane["state"]}')
+    return 0
+
+
+PREDECESSOR = 'coordinator-prev'
+
+
+def own_terminal():
+    """(backend, handle) of the terminal this session runs in, from its environment."""
+    how = detect_backend()
+    handle = {'herdr': os.environ.get('HERDR_PANE_ID'), 'orca': os.environ.get('ORCA_TERMINAL_HANDLE')}.get(how)
+    return how, handle
+
+
+def cmd_succeed(cfg, args):
+    """The coordinator hands over: its own lane becomes `coordinator-prev` (retiring), and a fresh `coordinator`
+    session starts on COORDINATOR_RESUME.md, which reads the coordinator card and closes the old terminal once the old
+    one has said SAFE TO CLOSE (`handed-over`)."""
+    dry = '--dry-run' in args
+    model = take(args, '--model')
+    card = cfg.path('cardsDir') / 'coordinator.md'
+    if not card.exists() and not dry:
+        raise SystemExit(f'coordinator: write your card {rel(cfg, card)} first (lanes, open questions, decisions '
+                         'pending, next 3 actions); the successor starts from it')
+    brief = cfg.path('briefsDir') / 'COORDINATOR_RESUME.md'
+    if not brief.exists() and not dry:
+        brief.parent.mkdir(parents=True, exist_ok=True)
+        brief.write_text(render((TEMPLATES / 'briefs' / 'COORDINATOR_RESUME.md').read_text(encoding='utf-8'), cfg),
+                         encoding='utf-8')
+    lanes = load_lanes(cfg)
+    if lanes.get(PREDECESSOR, {}).get('state') in ('live', 'retiring'):
+        raise SystemExit(f'coordinator: an earlier handover is unfinished ({PREDECESSOR} is still {lanes[PREDECESSOR]["state"]}); '
+                         'run close-predecessor from the current coordinator, or retire that lane first')
+    old = dict(lanes.get('coordinator') or {})
+    how, handle = own_terminal()
+    if handle:  # what this session knows about its own terminal beats a stale record
+        old.update({'backend': how, 'handle': handle})
+    old.update({'role': PREDECESSOR, 'kind': 'coordinator', 'state': 'retiring', 'retired': now()})
+    lanes.pop('coordinator', None)
+    lanes[PREDECESSOR] = old
+    if not dry:
+        save_lanes(cfg, lanes)
+    code = cmd_spawn(cfg, ['coordinator', rel(cfg, brief), '--coordinator'] + (['--model', model] if model else [])
+                     + (['--dry-run'] if dry else []))
+    if code == 0 and not dry:
+        print('Handed over. Now: finish your turn by running `handed-over` and then ending with SAFE TO CLOSE. '
+              'The successor closes this terminal when it sees that.')
+    return code
+
+
+def cmd_handed_over(cfg, args):
+    """(the old coordinator) Record the last word SAFE TO CLOSE for the predecessor lane."""
+    lanes = load_lanes(cfg)
+    if PREDECESSOR not in lanes:
+        raise SystemExit('coordinator: no handover is running; run `succeed` first')
+    p = cfg.path('reportsDir') / f'{PREDECESSOR}_progress.md'
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open('a', encoding='utf-8') as f:
+        f.write(f'\n[{now()}] handover done, card current.\nSAFE TO CLOSE\n')
+    print('recorded. End your turn with the words SAFE TO CLOSE.')
+    return 0
+
+
+def cmd_close_predecessor(cfg, args):
+    """(the successor) Close the old coordinator's terminal, but only once its last word is SAFE TO CLOSE."""
+    wait = int(take(args, '--wait') or 0)
+    lanes = load_lanes(cfg)
+    lane = lanes.get(PREDECESSOR)
+    if not lane or lane.get('state') == 'closed':
+        print('no predecessor to close')
+        return 0
+    if lane.get('handle') and lane.get('handle') == own_terminal()[1]:
+        raise SystemExit('coordinator: that terminal is this session; the predecessor is closed from the successor')
+    deadline = time.time() + wait
+    while True:
+        word = last_word(cfg, PREDECESSOR)
+        if word == 'safe' or time.time() >= deadline:
+            break
+        time.sleep(min(5, max(0.1, deadline - time.time())))
+    if word != 'safe':
+        print(f'predecessor not closed: its last word is {"KEEP OPEN" if word == "keep" else "missing"}, not SAFE TO CLOSE. '
+              'Message it on the bus (role coordinator-prev) or ask the user; run this again afterwards.')
+        return 1
+    if not close_terminal(cfg, lane):
+        print(f'{PREDECESSOR}: close attempted but it may still be running; close its terminal yourself')
+    lane['state'] = 'closed'
+    save_lanes(cfg, lanes)
+    print(f'{PREDECESSOR}: closed')
     return 0
 
 
@@ -1702,6 +1793,7 @@ VERBS = {
     'init': cmd_init, 'spawn': cmd_spawn, 'retire': cmd_retire, 'respawn': cmd_respawn, 'lanes': cmd_lanes,
     'status': cmd_status, 'close-idle': cmd_close_idle, 'reap': cmd_reap, 'ask': cmd_ask, 'questions': cmd_questions,
     'answer': cmd_answer, 'preflight': cmd_preflight, 'usage': cmd_usage, 'usage-watch': cmd_usage_watch,
+    'succeed': cmd_succeed, 'handed-over': cmd_handed_over, 'close-predecessor': cmd_close_predecessor,
     'pause': cmd_pause, 'paused': cmd_paused, 'resume': cmd_resume, 'record-usage': cmd_record_usage,
 }
 
