@@ -201,6 +201,59 @@ class GlobalTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(json.loads((self.g / 'pause.json').read_text())['paused'])
 
+    # ---- piforge -> global sync (board on another machine)
+    def fake(self, q, code=0, calls=None):
+        def runner(argv, **kw):
+            if calls is not None:
+                calls.append(argv)
+            return subprocess.CompletedProcess(argv, code, json.dumps(q), '')
+        return runner
+
+    def test_sync_frozen_queue_raises_pause_then_thaw_resumes(self):
+        g = GlobalBus(self.g)
+        calls = []
+        q = {'frozen': True, 'paused': True, 'paused_by': 'azoof', 'reason': 'firmware flash'}
+        r = global_bus.sync_piforge(g, 'stub', 60, self.fake(q, calls=calls), now=1000)
+        self.assertTrue(r.startswith('piforge sync: pause'))
+        st = g.pause_state()
+        self.assertTrue(st['paused'])
+        self.assertEqual(st['by'], 'piforge/piforge')
+        self.assertIn('frozen by azoof: firmware flash', st['reason'])
+        self.assertEqual(calls, [['stub', 'queue', '--json']])  # only asks; never pause/resume
+        # not due yet: no call at all
+        self.assertIsNone(global_bus.sync_piforge(g, 'stub', 60, self.fake({'frozen': False}, calls=calls), now=1030))
+        self.assertEqual(len(calls), 1)
+        r = global_bus.sync_piforge(g, 'stub', 60, self.fake({'frozen': False}), now=1061)
+        self.assertTrue(r.startswith('piforge sync: resume'))
+        self.assertFalse(g.pause_state()['paused'])
+
+    def test_sync_never_resumes_a_pause_someone_broadcast(self):
+        g = GlobalBus(self.g)
+        g.broadcast('release freeze', 'alpha', 'user', kind='pause')
+        self.assertIsNone(global_bus.sync_piforge(g, 'stub', 60, self.fake({'frozen': False}), now=time.time()))
+        self.assertTrue(g.pause_state()['paused'])
+        self.assertEqual(g.pause_state()['by'], 'alpha/user')
+
+    def test_sync_quiet_when_board_unreachable_or_old_client(self):
+        g = GlobalBus(self.g)
+        self.assertIsNone(global_bus.sync_piforge(g, 'stub', 60, self.fake({}, code=1), now=1000))
+        def bad(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, 'not json', '')
+        self.assertIsNone(global_bus.sync_piforge(g, 'stub', 60, bad, now=2000))
+        def gone(argv, **kw):
+            raise FileNotFoundError(argv[0])
+        self.assertIsNone(global_bus.sync_piforge(g, 'stub', 60, gone, now=3000))
+        self.assertFalse(g.pause_state().get('paused'))
+
+    def test_sync_via_hook_with_stub_on_path(self):
+        stub = Path(self.tmp.name) / 'pf'
+        stub.write_text('#!/bin/sh\n[ "$1" = queue ] && echo \'{"frozen": true, "reason": "disk swap"}\'\n')
+        stub.chmod(0o755)
+        env = dict(self.env, AGENT_BUS_PIFORGE_BIN=str(stub), AGENT_BUS_PIFORGE_SYNC='on')
+        code, out = run(['hook', '--event', 'SessionStart', '--session', 's1'], self.beta, **env)
+        self.assertEqual(code, 0)
+        self.assertIn('disk swap', out)
+        self.assertEqual(json.loads((self.g / 'pause.json').read_text())['by'], 'piforge/piforge')
 
 if __name__ == '__main__':
     unittest.main()

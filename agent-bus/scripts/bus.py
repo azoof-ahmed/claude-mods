@@ -38,6 +38,9 @@ Configuration (first match wins): flags > <project>/.claude/claude-mods.json "ag
     AGENT_BUS_PAUSE_PIFORGE          auto | on | off: a global pause also runs `piforge pause --reason` (auto: when
                                      piforge is on PATH)
     AGENT_BUS_PIFORGE_BIN            the piforge client to run for that (default piforge)
+    AGENT_BUS_PIFORGE_SYNC           auto | on | off: a frozen piforge queue raises a global pause, and its thaw resumes
+                                     it (`piforge queue --json`, checked by watches and session hooks; auto: piforge on PATH)
+    AGENT_BUS_PIFORGE_SYNC_INTERVAL  seconds between those checks, shared by every session on this machine (default 60)
 """
 import json
 import os
@@ -68,6 +71,8 @@ DEFAULTS = {
     'globalRate': '5/60',
     'pausePiforge': 'auto',
     'piforgeBin': 'piforge',
+    'piforgeSync': 'auto',
+    'piforgeSyncInterval': 60,
 }
 ENV = {
     'dir': 'AGENT_BUS_DIR', 'orcaBusPath': 'AGENT_BUS_ORCA_BUS_PATH', 'backend': 'AGENT_BUS_BACKEND',
@@ -75,7 +80,8 @@ ENV = {
     'tasksDb': 'AGENT_BUS_TASKS_DB', 'roles': 'AGENT_BUS_ROLES',
     'global': 'AGENT_BUS_GLOBAL', 'globalDir': 'AGENT_BUS_GLOBAL_DIR', 'globalMaxChars': 'AGENT_BUS_GLOBAL_MAX_CHARS',
     'globalRate': 'AGENT_BUS_GLOBAL_RATE', 'pausePiforge': 'AGENT_BUS_PAUSE_PIFORGE',
-    'piforgeBin': 'AGENT_BUS_PIFORGE_BIN',
+    'piforgeBin': 'AGENT_BUS_PIFORGE_BIN', 'piforgeSync': 'AGENT_BUS_PIFORGE_SYNC',
+    'piforgeSyncInterval': 'AGENT_BUS_PIFORGE_SYNC_INTERVAL',
 }
 
 
@@ -158,6 +164,7 @@ def load_config(flags=None, root=None):
     cfg['global'] = str(cfg['global']).lower() not in ('off', 'false', '0', 'no')
     cfg['globalDir'] = str(Path(os.path.expanduser(cfg['globalDir'] or global_bus.default_dir())))
     cfg['globalMaxChars'] = int(cfg['globalMaxChars'])
+    cfg['piforgeSyncInterval'] = float(cfg['piforgeSyncInterval'])
     cfg['project'] = root.name
     cfg['root'] = str(root)
     return cfg
@@ -173,11 +180,19 @@ def session_key(cfg, role, session=None):
     return f'session:{session}' if session else f"{cfg['root']}|{role or '-'}"
 
 
+def piforge_sync(cfg, g):
+    """The piforge -> global link (see global_bus.sync_piforge); a no-op unless due and wanted."""
+    if global_bus.piforge_wanted(cfg['piforgeSync'], cfg['piforgeBin']):
+        return global_bus.sync_piforge(g, cfg['piforgeBin'], cfg['piforgeSyncInterval'])
+    return None
+
+
 def global_hook_text(cfg, role, session=None):
     """New global messages for this session, rendered for the hook (None when nothing new or the channel is off)."""
     if not cfg['global']:
         return None
     g = open_global(cfg)
+    piforge_sync(cfg, g)
     msgs, first = g.take_new(session_key(cfg, role, session), cfg['project'], role)
     return global_bus.served_text(msgs, g.pause_state(), first)
 
@@ -253,6 +268,7 @@ def global_watch_thread(cfg, role, out_lock):
         nonlocal pos
         while True:
             time.sleep(2)
+            piforge_sync(cfg, g)
             if g.size() < pos:
                 pos = 0
             msgs, pos = g.read_from(pos)

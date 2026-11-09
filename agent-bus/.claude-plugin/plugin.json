@@ -1,6 +1,6 @@
 {
   "name": "agent-bus",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca or herdr terminals, a /bus chat pane, an unread band and a localhost web chat show it all. A machine-wide global channel reaches every session, with a global pause/resume. Built on orca-bus.",
   "author": {
     "name": "Azoof Ahmed"
@@ -159,6 +159,23 @@
       "title": "piforge client",
       "description": "The piforge command the global pause runs.",
       "default": "piforge"
+    },
+    "piforgeSync": {
+      "type": "string",
+      "title": "Frozen piforge pauses agents",
+      "description": "on: when the piforge queue is frozen (piforge pause/stop), every session gets a global pause with its reason, and the thaw resumes it. Checked with `piforge queue --json` by bus watches and session hooks. auto: only when piforge is on PATH. off: never.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "on",
+        "off"
+      ]
+    },
+    "piforgeSyncInterval": {
+      "type": "number",
+      "title": "piforge check interval (s)",
+      "description": "Seconds between `piforge queue` checks, shared by every session on this machine.",
+      "default": 60
     }
   }
 }

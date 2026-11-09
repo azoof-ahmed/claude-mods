@@ -24,6 +24,7 @@ CLEAN = {k: '' for k in list(bus.ENV.values()) + ['AGENT_BUS_ROLE', 'ORCA_BUS_NA
 _GLOBAL_TMP = tempfile.mkdtemp(prefix='agent-bus-global-test-')
 CLEAN['AGENT_BUS_GLOBAL_DIR'] = str(Path(_GLOBAL_TMP) / 'g')
 CLEAN['AGENT_BUS_PAUSE_PIFORGE'] = 'off'
+CLEAN['AGENT_BUS_PIFORGE_SYNC'] = 'off'  # the piforge -> global sync never runs in tests unless a test turns it on
 # ...and if a test turns the piforge link on, it reaches this stub, which only records its arguments.
 PIFORGE_STUB = Path(_GLOBAL_TMP) / 'piforge-stub'
 PIFORGE_CALLS = Path(_GLOBAL_TMP) / 'piforge-calls.txt'

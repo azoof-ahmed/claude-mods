@@ -276,3 +276,57 @@ def run_piforge(kind, reason, binary='piforge', runner=None):
     if r.returncode != 0:
         return f'piforge {kind}: exit {r.returncode}: {(r.stderr or r.stdout or "").strip()[:200]}'
     return f'piforge {kind}: ok'
+
+
+SYNC_ROLE = ('piforge', 'piforge')  # project, role of broadcasts raised by the piforge sync and bus-piforge-hook
+
+
+def sync_piforge(g, binary='piforge', interval=60, runner=None, now=None):
+    """piforge -> global, for a piforge board on another machine (its on_pause hook can't reach this global dir).
+
+    Asks `piforge queue --json` at most once per `interval` seconds per global dir (shared by every session and
+    watch on this machine). A frozen queue with no global pause in force raises one from piforge/piforge; a thawed
+    queue resumes a global pause only when piforge raised it (a pause someone broadcast stays theirs to resume).
+    Never calls piforge pause/resume, so it can't loop with run_piforge. Returns a one-line result, or None when
+    the check isn't due or nothing changed. Never raises."""
+    runner = runner or subprocess.run
+    now = now or time.time()
+    stamp = g.root / 'piforge_sync.json'
+    try:
+        g.root.mkdir(parents=True, exist_ok=True)
+        try:
+            last = float(json.loads(stamp.read_text(encoding='utf-8')).get('checked', 0))
+        except (OSError, ValueError, AttributeError):
+            last = 0.0
+        if now - last < float(interval):
+            return None
+        tmp = stamp.with_suffix(f'.{os.getpid()}.tmp')
+        tmp.write_text(json.dumps({'checked': now}), encoding='utf-8')
+        os.replace(tmp, stamp)  # claim the slot first, so concurrent sessions skip this round
+    except OSError:
+        return None
+    try:
+        r = runner([binary or 'piforge', 'queue', '--json'], capture_output=True, text=True, timeout=8)
+        if r.returncode != 0:
+            return None  # board unreachable or an old client without `queue`: nothing to say
+        q = json.loads(r.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(q, dict):
+        return None
+    st = g.pause_state()
+    ours = st.get('by') == '/'.join(SYNC_ROLE)
+    try:
+        if q.get('frozen') and not st.get('paused'):
+            why = (q.get('reason') or 'no reason given').strip()
+            who = f" by {q['paused_by']}" if q.get('paused_by') else ''
+            word = 'stopped' if q.get('stopped') else 'frozen'
+            text = f'piforge queue {word}{who}: {why}'[:g.max_chars]
+            m = g.broadcast(text, *SYNC_ROLE, kind='pause', now=now)
+            return f"piforge sync: pause {m['id']}"
+        if not q.get('frozen') and st.get('paused') and ours:
+            m = g.broadcast('piforge queue resumed', *SYNC_ROLE, kind='resume', now=now)
+            return f"piforge sync: resume {m['id']}"
+    except GlobalError:
+        return None
+    return None
