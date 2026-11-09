@@ -18,6 +18,8 @@ export type CoordContext = {
 }
 
 const USAGE_EVERY_CALLS = 10
+const REFRESH_EVERY_CALLS = 5 // re-read `coord context` this often while unknown, unconfigured or coordinating
+const CONTEXT_TIMEOUT_MS = 5000
 const RETIRE_STEP = 0.1 // remind again every further 10% past the threshold
 
 function str(v: unknown, fallback: string): string {
@@ -90,12 +92,32 @@ async function runCoord($: EngineInterface, python: string, args: string[], time
 }
 
 /** Asks coord.py whether this project is coordinated and who this session is. */
-async function readContext($: EngineInterface, python: string): Promise<CoordContext | undefined> {
-  const ran = await runCoord($, python, ['context'], 15000)
+async function readContext($: EngineInterface, python: string, timeoutMs = 15000): Promise<CoordContext | undefined> {
+  const ran = await runCoord($, python, ['context'], timeoutMs)
   if (ran.exitCode !== 0) {
     return undefined
   }
   return JSON.parse(ran.stdout) as CoordContext
+}
+
+/** The status line of a coordinator session; undefined for any other session. */
+export function statusLine(c: CoordContext | undefined): string | undefined {
+  if (c === undefined || !c.configured || !c.isCoordinator) {
+    return undefined
+  }
+  return `coord: ${c.live.length}/${c.maxLanes} lanes${c.questions > 0 ? `, ${c.questions} question(s)` : ''}`
+}
+
+/**
+ * Whether the tool-call hook should re-read the context now. A session that started before the project was
+ * coordinated (or before the plugin could read it) has no context, or an unconfigured one, and must find out
+ * later; a coordinator keeps its status line current.
+ */
+export function shouldRefresh(c: CoordContext | undefined, calls: number): boolean {
+  if (calls % REFRESH_EVERY_CALLS !== 0) {
+    return false
+  }
+  return c === undefined || !c.configured || c.isCoordinator
 }
 
 /** One pass of the graceful pause, then the fresh context; a finished pause is announced. */
@@ -153,6 +175,24 @@ export function retireReminder(tokens: number, threshold: number, lastLevel: num
   }
 }
 
+const COMMAND_DESCRIPTION =
+  'Coordinate worker agents: init, status, lanes, spawn, retire, respawn, close-idle, questions, answer, preflight, usage, pause, resume.'
+const COMMAND_HINT =
+  '[init|status|lanes|spawn <role> [brief]|retire <role>|respawn <role>|close-idle|questions|answer <id> <text>|preflight|usage|pause|resume]'
+
+/** Runs `/coord <verb>`; returns the CLI's text and the fresh context (for the status line). */
+async function runCommandVerb($: EngineInterface, python: string, typed: string): Promise<{ text: string; ctx: CoordContext | undefined }> {
+  const args = typed === '' ? ['status'] : typed.split(/\s+/)
+  const ran = await runCoord($, python, args, 120000)
+  const text = [ran.stdout.trim(), ran.stderr.trim()].filter(t => t !== '').join('\n')
+  const c = await readContext($, python)
+  const line = statusLine(c)
+  if (line !== undefined) {
+    $.ui.status(line)
+  }
+  return { text: text === '' ? `coordinator ${args.join(' ')}: done` : text, ctx: c }
+}
+
 export const register: Register = (on, options) => {
   const python = str(options.python, 'python')
 
@@ -187,11 +227,11 @@ export const register: Register = (on, options) => {
     await $.env.set('COORD_REPORTS_DIR', str(options.reportsDir, '.claude/coord/reports'))
     await $.env.set('COORD_MIN_FREE_RAM_GB', String(num(options.minFreeRamGb, 4)))
     await $.env.set('COORD_MIN_BATTERY', String(num(options.minBattery, 40)))
-    await $.command.register({
-      name: 'coordinator',
-      description: 'Coordinate worker agents: init, status, lanes, spawn, retire, respawn, close-idle, questions, answer, preflight, usage, pause, resume.',
-      argumentHint: '[init|status|lanes|spawn <role> [brief]|retire <role>|respawn <role>|close-idle|questions|answer <id> <text>|preflight|usage|pause|resume]',
-    })
+    // `/coordinator` autocompletes to the skill `/coordinator:coordinator` (same name as the plugin), so the
+    // command is also registered as `/coord`, which no skill shares. Both run the same handler.
+    for (const name of ['coord', 'coordinator']) {
+      await $.command.register({ name, description: COMMAND_DESCRIPTION, argumentHint: COMMAND_HINT })
+    }
     // While a graceful pause runs, advance it every minute: close the lanes that checkpointed,
     // remind the silent ones once, interrupt them after the grace period, write the resume list.
     $.clock.every(60000, () => {
@@ -211,17 +251,15 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('command.run', { command: 'coord' }, async ($, e) => {
+    const r = await runCommandVerb($, python, e.args.trim())
+    ctx = r.ctx ?? ctx
+    return { text: r.text }
+  })
   on('command.run', { command: 'coordinator' }, async ($, e) => {
-    const typed = e.args.trim()
-    const args = typed === '' ? ['status'] : typed.split(/\s+/)
-    const ran = await runCoord($, python, args, 120000)
-    const text = [ran.stdout.trim(), ran.stderr.trim()].filter(t => t !== '').join('\n')
-    const c = await readContext($, python)
-    ctx = c ?? ctx
-    if (c?.configured && c.isCoordinator) {
-      $.ui.status(`coord: ${c.live.length}/${c.maxLanes} lanes${c.questions > 0 ? `, ${c.questions} question(s)` : ''}`)
-    }
-    return { text: text === '' ? `coordinator ${args.join(' ')}: done` : text }
+    const r = await runCommandVerb($, python, e.args.trim())
+    ctx = r.ctx ?? ctx
+    return { text: r.text }
   })
 
   on('classic.SessionStart', async ($, e, next) => {
@@ -235,15 +273,36 @@ export const register: Register = (on, options) => {
     if (lines.length === 0) {
       return result
     }
-    if (c.isCoordinator) {
-      $.ui.status(`coord: ${c.live.length}/${c.maxLanes} lanes${c.questions > 0 ? `, ${c.questions} question(s)` : ''}`)
+    const line = statusLine(c)
+    if (line !== undefined) {
+      $.ui.status(line)
     }
     return { ...result, additionalContext: [...(result.additionalContext ?? []), ...lines] }
   }).catch(($, e, next) => next(e))
 
   on('classic.PostToolUse', async ($, e, next) => {
-    const result = await next(e)
+    const base = await next(e)
     calls += 1
+    const fresh: string[] = []
+    let result = base
+    if (shouldRefresh(ctx, calls)) {
+      const wasConfigured = ctx?.configured === true
+      const c = await readContext($, python, CONTEXT_TIMEOUT_MS).catch(() => undefined)
+      if (c !== undefined) {
+        ctx = c
+        const line = statusLine(c)
+        if (line !== undefined) {
+          $.ui.status(line)
+        }
+        if (!wasConfigured) {
+          // the project became coordinated after this session started: give the session its start-up lines now
+          fresh.push(...contextLines(c, cliFor(python, $.plugin.root)))
+        }
+      }
+    }
+    if (fresh.length > 0) {
+      result = { ...base, additionalContext: [...(base.additionalContext ?? []), ...fresh] }
+    }
     if (ctx === undefined || !ctx.configured || calls % USAGE_EVERY_CALLS !== 0) {
       return result
     }

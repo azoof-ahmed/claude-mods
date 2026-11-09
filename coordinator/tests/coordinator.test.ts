@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { contextLines, retireReminder, usageNotes, type CoordContext } from '../hooks/register'
+import { contextLines, retireReminder, shouldRefresh, statusLine, usageNotes, type CoordContext } from '../hooks/register'
 
 const BASE: CoordContext = {
   configured: true,
@@ -82,4 +82,54 @@ test('no weekly note while a pause is already running', async () => {
 test('everyone checkpoints at the session threshold', async () => {
   const r = usageNotes([{ kind: 'five_hour', percentUsed: 98 }], { ...BASE, isCoordinator: false }, new Set())
   expect(r.notes[0]).toContain('Checkpoint')
+})
+
+test('statusLine is for coordinators only', async () => {
+  expect(statusLine(undefined)).toBeUndefined()
+  expect(statusLine({ ...BASE, configured: false })).toBeUndefined()
+  expect(statusLine({ ...BASE, isCoordinator: false })).toBeUndefined()
+  expect(statusLine({ ...BASE, questions: 1 })).toBe('coord: 2/6 lanes, 1 question(s)')
+})
+
+test('a session that does not know its project re-reads it every 5 calls; a worker does not', async () => {
+  expect(shouldRefresh(undefined, 5)).toBe(true)
+  expect(shouldRefresh(undefined, 4)).toBe(false)
+  expect(shouldRefresh({ ...BASE, configured: false }, 10)).toBe(true)
+  expect(shouldRefresh(BASE, 10)).toBe(true)
+  expect(shouldRefresh({ ...BASE, isCoordinator: false }, 10)).toBe(false)
+})
+
+const POST_TOOL = {
+  tool_name: 'Bash',
+  tool_input: { command: 'ls' },
+  tool_response: { stdout: '', stderr: '' },
+  tool_use_id: 'toolu_1',
+} as never
+
+test('a project coordinated after the session started gets the status line without a restart', async ($, on) => {
+  let current: CoordContext = { ...BASE, configured: false }
+  on('classic.SessionStart', () => ({}))
+  on('classic.PostToolUse', () => ({}))
+  on('process.run', () => ({
+    value: { exitCode: 0, stdout: JSON.stringify(current), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  const statuses: (string | undefined)[] = []
+  on('ui.status', async ($$, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  await $.classic.SessionStart({ source: 'startup' } as never)
+  expect(statuses).toEqual([])
+  current = BASE // `/coordinator init` ran meanwhile
+  let last: { additionalContext?: string[] } = {}
+  for (let i = 0; i < 5; i += 1) {
+    last = (await $.classic.PostToolUse(POST_TOOL)) as never
+  }
+  expect(statuses.at(-1)).toBe('coord: 2/6 lanes')
+  expect((last.additionalContext ?? []).join('\n')).toContain('2 live of max 6')
+  current = { ...BASE, live: ['a'], questions: 3 }
+  for (let i = 0; i < 5; i += 1) {
+    await $.classic.PostToolUse(POST_TOOL)
+  }
+  expect(statuses.at(-1)).toBe('coord: 1/6 lanes, 3 question(s)')
 })
