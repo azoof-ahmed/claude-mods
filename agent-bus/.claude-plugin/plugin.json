@@ -1,7 +1,7 @@
 {
   "name": "agent-bus",
-  "version": "0.1.5",
-  "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca terminals, a /bus chat pane, an unread band and a localhost web chat show it all. A machine-wide global channel reaches every session, with a global pause/resume. Built on orca-bus.",
+  "version": "0.1.6",
+  "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca or herdr terminals, a /bus chat pane, an unread band and a localhost web chat show it all. A machine-wide global channel reaches every session, with a global pause/resume. Built on orca-bus.",
   "author": {
     "name": "Azoof Ahmed"
   },
@@ -41,17 +41,19 @@
     "backend": {
       "type": "string",
       "title": "Terminal backend for urgent mail",
-      "description": "orca: the deliver daemon may type urgent mail and idle nudges into Orca terminals. none: nothing is ever typed; mail arrives through the hook and the Monitor only.",
+      "description": "orca: the deliver daemon may type urgent mail and idle nudges into Orca terminals. herdr: the same, into herdr panes. auto: herdr inside a herdr pane, orca inside an Orca terminal, else none. none: nothing is ever typed; mail arrives through the hook and the Monitor only.",
       "default": "none",
       "options": [
         "none",
-        "orca"
+        "orca",
+        "herdr",
+        "auto"
       ]
     },
     "nudgeAfter": {
       "type": "number",
       "title": "Nudge after (seconds)",
-      "description": "orca backend: seconds of unread mail before the daemon types one nudge into an idle tab. Never sent while that role has a live watch.",
+      "description": "orca and herdr backends: seconds of unread mail before the daemon types one nudge into an idle tab. Never sent while that role has a live watch.",
       "default": 300
     },
     "monitor": {

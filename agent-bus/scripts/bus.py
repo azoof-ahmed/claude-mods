@@ -8,7 +8,7 @@
     python bus.py watch-live --as <role>                 exit 0 when a live watch (heartbeat) exists for the role
     python bus.py whoami                                 the role this session resolves to
     python bus.py hook --event PostToolUse|Stop          serve new mail as JSON {"text": ...} (used by the mod)
-    python bus.py deliver                                the typing daemon (orca backend only)
+    python bus.py deliver                                the typing daemon (orca and herdr backends)
     python bus.py chat [--detach|--status|--stop]        the localhost web chat (prints its URL)
     python bus.py tui [--open] [--as ROLE] [--theme T]   the terminal client (Textual); --open: in a new terminal
     python bus.py snapshot [--since CURSOR] [--as user]  JSON for the /bus pane (messages, roles, health, cursor)
@@ -23,9 +23,10 @@ Configuration (first match wins): flags > <project>/.claude/claude-mods.json "ag
 (the plugin's options arrive as environment variables) > defaults.
     --dir / AGENT_BUS_DIR            bus directory (default .claude/bus under the project root)
     AGENT_BUS_ROLE                   this session's role (also ORCA_BUS_NAME, or the registry entry for the
-                                     terminal handle in ORCA_TERMINAL_HANDLE)
+                                     terminal handle: ORCA_TERMINAL_HANDLE, or HERDR_PANE_ID inside herdr)
     AGENT_BUS_ORCA_BUS_PATH          a checkout of orca-bus to import from (else the installed package)
-    AGENT_BUS_BACKEND                orca | none: who may type urgent mail into a terminal (default none)
+    AGENT_BUS_BACKEND                orca | herdr | auto | none: who may type urgent mail into a terminal (default
+                                     none; auto: herdr inside a herdr pane, orca inside an Orca terminal, else none)
     AGENT_BUS_NUDGE_AFTER            seconds of unread mail before the daemon types one nudge (default 300)
     AGENT_BUS_CHAT_PORT / AGENT_BUS_CHAT_BIND   web chat port (8790) and bind address (127.0.0.1)
     AGENT_BUS_TASKS_DB               optional task-tracker db shown in the chat's lane list
@@ -76,6 +77,27 @@ ENV = {
     'globalRate': 'AGENT_BUS_GLOBAL_RATE', 'pausePiforge': 'AGENT_BUS_PAUSE_PIFORGE',
     'piforgeBin': 'AGENT_BUS_PIFORGE_BIN',
 }
+
+
+BACKENDS = ('none', 'orca', 'herdr', 'auto')
+
+
+def detect_backend(env=None):
+    """`auto`: herdr inside a herdr pane, orca inside an Orca terminal, else none (nothing is typed)."""
+    env = os.environ if env is None else env
+    if env.get('HERDR_ENV') == '1' and env.get('HERDR_PANE_ID'):
+        return 'herdr'
+    if env.get('ORCA_TERMINAL_HANDLE'):
+        return 'orca'
+    return 'none'
+
+
+def term_handle(env=None):
+    """This terminal's handle: the herdr pane id inside herdr, else the Orca terminal handle (or None)."""
+    env = os.environ if env is None else env
+    if env.get('HERDR_ENV') == '1' and env.get('HERDR_PANE_ID'):
+        return env['HERDR_PANE_ID']
+    return env.get('ORCA_TERMINAL_HANDLE') or None
 
 
 def project_root(start=None):
@@ -129,8 +151,10 @@ def load_config(flags=None, root=None):
     cfg['dir'] = str(d if d.is_absolute() else root / d)
     cfg['nudgeAfter'] = float(cfg['nudgeAfter'])
     cfg['chatPort'] = int(cfg['chatPort'])
-    if cfg['backend'] not in ('orca', 'none'):
-        raise SystemExit(f"agent-bus: backend must be orca or none, not {cfg['backend']!r}")
+    if cfg['backend'] not in BACKENDS:
+        raise SystemExit(f"agent-bus: backend must be orca, herdr, auto or none, not {cfg['backend']!r}")
+    cfg['backendSetting'] = cfg['backend']
+    cfg['backend'] = detect_backend() if cfg['backend'] == 'auto' else cfg['backend']
     cfg['global'] = str(cfg['global']).lower() not in ('off', 'false', '0', 'no')
     cfg['globalDir'] = str(Path(os.path.expanduser(cfg['globalDir'] or global_bus.default_dir())))
     cfg['globalMaxChars'] = int(cfg['globalMaxChars'])
@@ -253,7 +277,17 @@ def import_orca_bus(cfg):
         from orca_bus import cli  # noqa: F401
     except ImportError:
         raise SystemExit(f"agent-bus: cannot import orca_bus from {sys.path[0]}; check the orcaBusPath option")
+    if cfg.get('backend') == 'herdr':
+        use_herdr()
     return orca_bus
+
+
+def use_herdr():
+    """Put the herdr adapter in place of orca-bus's Orca wrapper: its callers import `Orca` lazily from that module,
+    so the deliver daemon, `send --now`, `who` and the chat's liveness all reach herdr panes."""
+    import orca_bus.orca as orca_mod
+    from herdr_term import Herdr
+    orca_mod.Orca = Herdr
 
 
 def chat_url(cfg):
@@ -395,6 +429,19 @@ def tui_verb(argv, cfg, root):
             return 0
         if r.returncode == 0:
             orca_close_by_title('bus-tui', before)  # the tab may exist: never leave an orphan
+    if cfg['backend'] == 'herdr' and shutil.which('herdr'):
+        ws = os.environ.get('HERDR_WORKSPACE_ID')
+        r = subprocess.run(['herdr', 'tab', 'create', '--label', 'bus-tui', '--cwd', cfg['root'], '--env', env_dir]
+                           + (['--workspace', ws] if ws else []), capture_output=True, **TEXT)
+        try:
+            pane = ((json.loads(r.stdout or '{}').get('result') or {}).get('root_pane') or {}).get('pane_id')
+        except (ValueError, AttributeError):
+            pane = None
+        if pane:
+            line = ' '.join(f'"{c}"' for c in cmd)
+            subprocess.run(['herdr', 'pane', 'run', pane, line], capture_output=True)
+            print(f'tui: opened in herdr pane {pane}')
+            return 0
     if os.environ.get('TMUX') and shutil.which('tmux'):
         subprocess.run(['tmux', 'new-window', '-n', 'bus-tui', '-e', env_dir] + cmd)
         print('tui: opened in a new tmux window')
@@ -473,7 +520,7 @@ def refresh_reply_cmd(root):
     return True
 
 
-# ---- the deliver daemon: started by the hook when the backend is orca
+# ---- the deliver daemon: started by the hook when the backend is orca or herdr
 #
 # One daemon per bus dir. It is alive while the pid in deliver.pid is a running deliver process; the heartbeat only
 # tells a hung daemon (no tick for DELIVER_HUNG_S) from a slow one, since one tick can wait 60 s on each orca call.
@@ -548,9 +595,9 @@ def ensure_deliver(root, cfg, now=None, start=None):
     Sessions that hook at the same moment are serialised by the start lock, and the new pid is written to
     deliver.pid before the lock is released. Returns the pid it started, else None."""
     import shutil
-    if cfg['backend'] != 'orca' or Path(root, 'deliver.STOP').exists():
+    if cfg['backend'] not in ('orca', 'herdr') or Path(root, 'deliver.STOP').exists():
         return None
-    if start is None and not shutil.which('orca'):
+    if start is None and not shutil.which(cfg['backend']):
         return None
     try:  # the cheap path every hook takes while a daemon ticks: no process lookup, no lock
         if (now or time.time()) - (Path(root) / 'deliver.heartbeat').stat().st_mtime < DELIVER_STALE_S:
@@ -579,7 +626,7 @@ def resolve_role(bus, explicit=None):
     for v in (explicit, os.environ.get('AGENT_BUS_ROLE'), os.environ.get('ORCA_BUS_NAME')):
         if v:
             return v
-    return bus.name_for_handle(os.environ.get('ORCA_TERMINAL_HANDLE'))
+    return bus.name_for_handle(term_handle())
 
 
 # ---- the watch heartbeat: proves a Monitor is armed for a role
@@ -881,7 +928,7 @@ def main(argv=None):
                'watch': False, 'registered': False, 'cli': reply_cmd()}
         if event in ('SessionStart', 'Stop'):
             refresh_reply_cmd(root)  # a stale command in config.json reaches every nudge, watch and reply line
-        if cfg['backend'] == 'orca':
+        if cfg['backend'] in ('orca', 'herdr'):
             out['deliver'] = bool(ensure_deliver(root, cfg)) or deliver_state(root) == 'running'
         if role:
             entry = bus.registry().get(role) or {}
@@ -922,9 +969,10 @@ def main(argv=None):
             clear()
 
     if verb == 'deliver':
-        if cfg['backend'] != 'orca':
-            print('agent-bus: the deliver daemon types into Orca terminals; backend is "none", so mail is served by '
-                  'the hook and the watch alone. Set the backend option to orca to run it.', file=sys.stderr)
+        if cfg['backend'] not in ('orca', 'herdr'):
+            print('agent-bus: the deliver daemon types into Orca or herdr terminals; backend is "none", so mail is '
+                  'served by the hook and the watch alone. Set the backend option to orca, herdr or auto to run it.',
+                  file=sys.stderr)
             return 2
         other = deliver_pid(root)
         if other and other != os.getpid() and '--once' not in argv:
@@ -942,6 +990,8 @@ def main(argv=None):
     if verb == 'tui':
         return tui_verb(argv[1:], cfg, root)
 
+    if verb == 'register' and '--handle' not in argv and detect_backend() == 'herdr':
+        argv += ['--handle', term_handle()]  # orca-bus only knows ORCA_TERMINAL_HANDLE
     if verb in ('send', 'digest', 'read', 'ack', 'react', 'sub', 'unsub', 'pin', 'unpin', 'delete', 'edit',
                 'inbox') and '--as' not in argv and '--from' not in argv:
         role = resolve_role(bus)

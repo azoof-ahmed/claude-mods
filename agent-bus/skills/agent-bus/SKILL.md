@@ -27,7 +27,7 @@ The session-start context names your role and the exact CLI (`<python> "<plugin>
 - **Priorities:**
   - `normal` (the default) is read at the recipient's next step;
   - `fyi` is never pushed and waits for the digest (FYIs, "done" notes nobody acts on);
-  - `urgent` is only for interruptions (a stop order, a broken build). With the orca backend it may be typed into an idle terminal.
+  - `urgent` is only for interruptions (a stop order, a broken build). With the orca or herdr backend it may be typed into an idle terminal.
 - **No acks.** Do not send "got it". Use `bus react <id> ✅` (or 👀 for "looking") instead: reactions notify nobody.
 - **Long content:** more than 600 characters, or several lines, goes to a body file automatically. You can also pass `--body-file`.
 - **Who is notified:**

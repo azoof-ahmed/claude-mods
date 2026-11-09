@@ -1,7 +1,7 @@
 {
   "name": "coordinator",
-  "version": "0.2.8",
-  "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports, token-economy reminders, and a usage watcher with a graceful pause and resume.",
+  "version": "0.2.9",
+  "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, herdr, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports, token-economy reminders, and a usage watcher with a graceful pause and resume.",
   "author": {
     "name": "Azoof Ahmed"
   },
@@ -16,11 +16,13 @@
     "backend": {
       "type": "string",
       "title": "Worker terminal backend",
-      "description": "Where a worker starts: orca (Orca terminal tabs), tmux (windows of the current or a `coord` session), wt (Windows Terminal tabs), or manual (print the command to run).",
+      "description": "Where a worker starts: auto (herdr inside a herdr pane, orca inside an Orca terminal, tmux inside tmux, else manual), orca (Orca terminal tabs), herdr (a tab in the herdr workspace of the repo), tmux (windows of the current or a `coord` session), wt (Windows Terminal tabs), or manual (print the command to run).",
       "default": "manual",
       "options": [
         "manual",
+        "auto",
         "orca",
+        "herdr",
         "tmux",
         "wt"
       ]
@@ -88,7 +90,7 @@
     "probeCommand": {
       "type": "string",
       "title": "Usage probe command",
-      "description": "The throwaway Claude Code session the watcher opens to read /usage (orca and tmux backends). Use a cheap model.",
+      "description": "The throwaway Claude Code session the watcher opens to read /usage (orca, herdr and tmux backends). Use a cheap model.",
       "default": "claude --model haiku"
     },
     "pauseReminderMin": {

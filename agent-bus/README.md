@@ -46,7 +46,7 @@ The agent itself uses the CLI that its session context names: `python "<plugin>/
 | The agent is about to go idle | A **Stop hook** holds the agent back once if it has unread mail and hands it the mail. Once per 10 minutes, if no watch is live, it asks the agent to arm one before idling. | One continuation |
 | The agent is idle | A **Monitor** running `bus watch --as <role> --for 1790` (timeout 1800000 ms) prints one line per new non-fyi message. The line wakes the agent. | A turn per message |
 | Session start | A **SessionStart hook** names the role and the CLI, serves the backlog and, unless a watch is already live, asks the agent to arm the Monitor. | None |
-| Backstop (orca backend only) | The **deliver daemon** (`bus deliver`) types one nudge into an idle Orca tab after `nudgeAfter` seconds of unread mail. It never nudges a role with a live watch. The hooks start it (one per bus dir) and restart it when its heartbeat goes stale. | One turn |
+| Backstop (orca or herdr backend) | The **deliver daemon** (`bus deliver`) types one nudge into an idle Orca tab or herdr pane after `nudgeAfter` seconds of unread mail. It never nudges a role with a live watch. The hooks start it (one per bus dir) and restart it when its heartbeat goes stale. | One turn |
 
 **How "a watch is live" is known:** `bus watch` writes a heartbeat (`inbox/<role>.watch.json`, refreshed every 30 s, stale after 90 s). The hooks and the daemon read it, so nobody is asked to arm a second Monitor and nobody is nudged while one listens.
 
@@ -83,7 +83,7 @@ Each project's bus is its own. The global channel is one more log, machine-wide 
 | `register <role> --kind claude --mode file [--handle H]` | Joins the bus. |
 | `chat [--detach\|--status\|--stop] [--port N] [--bind A]` | The web chat. |
 | `tui [--open] [--as R] [--theme T]` | The terminal client. |
-| `deliver` | The typing daemon. It needs the orca backend. Every session's hook starts it in the background unless the pid in `deliver.pid` is a running daemon (one per bus dir, under a start lock); one that has not ticked for 10 minutes is stopped and replaced. Output goes to `deliver.out` and `deliver.log` in the bus dir. Create `deliver.STOP` there to stop it and keep it stopped. |
+| `deliver` | The typing daemon. It needs the orca or herdr backend. Every session's hook starts it in the background unless the pid in `deliver.pid` is a running daemon (one per bus dir, under a start lock); one that has not ticked for 10 minutes is stopped and replaced. Output goes to `deliver.out` and `deliver.log` in the bus dir. Create `deliver.STOP` there to stop it and keep it stopped. |
 | `broadcast "<text>" [--to all\|coordinators] [--prio P] [--from NAME]` | A message on the machine-wide global channel. |
 | `broadcast --pause "<reason>"`, `broadcast --resume ["<note>"]` `[--no-piforge]` | A global pause or resume; kept in `pause.json`; may freeze piforge. |
 | `global status`, `global log [--n N]` | The global pause state; the last N global messages. |
@@ -185,7 +185,7 @@ second) and writes only through the same store and chat functions the CLI and th
 ### Launch
 
 ```bash
-/bus full                      # from Claude Code: opens it in a new terminal (Orca, tmux or Windows Terminal;
+/bus full                      # from Claude Code: opens it in a new terminal (Orca, herdr, tmux or Windows Terminal;
                                # else prints the command); /bus tui does the same
 agent-bus/tui/bus-tui          # directly in a terminal; on Windows: agent-bus\tui\bus-tui.cmd
 bus-tui --as coordinator --theme claude --dir path/to/bus
@@ -305,8 +305,8 @@ Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`
 | `roles` | `coordinator` | The roles `init` registers. |
 | `orcaBusPath` | (empty) | A checkout of orca-bus to use instead of the vendored copy. |
 | `python` | `python` | The interpreter. |
-| `backend` | `none` | `orca` lets the deliver daemon type urgent mail and nudges into Orca tabs. `none` never types. |
-| `nudgeAfter` | `300` | Seconds of unread mail before the daemon's one nudge (orca backend). |
+| `backend` | `none` | `orca` lets the deliver daemon type urgent mail and nudges into Orca tabs; `herdr` does the same in herdr panes (see below). `auto` is herdr inside a herdr pane, orca inside an Orca terminal, else none. `none` never types. |
+| `nudgeAfter` | `300` | Seconds of unread mail before the daemon's one nudge (orca and herdr backends). |
 | `monitor` | `on` | `off` stops the "arm a Monitor" requests. |
 | `chatPort` | `8790` | The web chat port. |
 | `chatBind` | `127.0.0.1` | `127.0.0.1`, `localhost` or `::1`. Loopback only. |
@@ -327,8 +327,10 @@ The bus's `config.json` holds `reply_cmd`, the command printed in every reply hi
 
 1. `AGENT_BUS_ROLE`;
 2. `ORCA_BUS_NAME`;
-3. the bus registry entry for `ORCA_TERMINAL_HANDLE`;
+3. the bus registry entry for this terminal: `HERDR_PANE_ID` inside herdr, else `ORCA_TERMINAL_HANDLE`;
 4. the `role` option.
+
+**herdr:** with the herdr backend (or `auto` in a herdr pane) the CLI swaps `scripts/herdr_term.py` in for orca-bus's Orca wrapper, so the deliver daemon, `send --now`, `who` and the web chat's liveness use herdr panes; a terminal handle is a pane id. `register` inside herdr records `HERDR_PANE_ID` as the handle. herdr reports no composer text, so the input box is read from the screen. When an agent's title carries no state glyph (an agent inside tmux, as claude-auto-retry runs it), herdr's own idle/working reading stands in for it.
 
 ## Files
 

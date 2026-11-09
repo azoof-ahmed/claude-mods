@@ -18,7 +18,8 @@ import bus  # noqa: E402
 from orca_bus.store import Bus  # noqa: E402
 
 CLEAN = {k: '' for k in list(bus.ENV.values()) + ['AGENT_BUS_ROLE', 'ORCA_BUS_NAME', 'ORCA_TERMINAL_HANDLE',
-                                                   'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID']}
+                                                   'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'HERDR_ENV',
+                                                   'HERDR_PANE_ID', 'HERDR_WORKSPACE_ID']}
 # Tests never touch the real machine-wide channel: every run gets a throwaway global dir and no piforge.
 _GLOBAL_TMP = tempfile.mkdtemp(prefix='agent-bus-global-test-')
 CLEAN['AGENT_BUS_GLOBAL_DIR'] = str(Path(_GLOBAL_TMP) / 'g')
@@ -363,6 +364,98 @@ class BusCliTest(unittest.TestCase):
             _, out = run(['hook', '--event', 'PostToolUse'], self.root)
             self.assertNotIn('deliver', json.loads(out))
         self.assertEqual(len(calls), 1)
+
+    # ---- herdr
+
+    HERDR = {'HERDR_ENV': '1', 'HERDR_PANE_ID': 'w2:p4'}
+
+    def test_auto_backend_and_the_terminal_handle(self):
+        self.assertEqual(bus.detect_backend(self.HERDR), 'herdr')
+        self.assertEqual(bus.detect_backend({'ORCA_TERMINAL_HANDLE': 'term_a'}), 'orca')
+        self.assertEqual(bus.detect_backend({'TMUX': '/tmp/t'}), 'none')
+        self.assertEqual(bus.term_handle({**self.HERDR, 'ORCA_TERMINAL_HANDLE': 'term_a'}), 'w2:p4')
+        self.assertEqual(bus.term_handle({'ORCA_TERMINAL_HANDLE': 'term_a'}), 'term_a')
+        with mock.patch.dict(os.environ, {**CLEAN, **self.HERDR, 'AGENT_BUS_BACKEND': 'auto'}):
+            cfg = bus.load_config({}, root=self.root)
+        self.assertEqual((cfg['backend'], cfg['backendSetting']), ('herdr', 'auto'))
+        with mock.patch.dict(os.environ, {**CLEAN, 'AGENT_BUS_BACKEND': 'auto'}):
+            self.assertEqual(bus.load_config({}, root=self.root)['backend'], 'none')
+        with mock.patch.dict(os.environ, {**CLEAN, 'AGENT_BUS_BACKEND': 'kitty'}):
+            with self.assertRaises(SystemExit):
+                bus.load_config({}, root=self.root)
+
+    def test_herdr_backend_swaps_in_the_herdr_adapter_and_starts_the_daemon(self):
+        import orca_bus.orca as orca_mod
+        import herdr_term
+        with mock.patch.object(orca_mod, 'Orca', orca_mod.Orca):
+            bus.import_orca_bus({'backend': 'herdr', 'orcaBusPath': ''})
+            self.assertIs(orca_mod.Orca, herdr_term.Herdr)
+        with mock.patch.object(orca_mod, 'Orca', orca_mod.Orca):
+            bus.import_orca_bus({'backend': 'orca', 'orcaBusPath': ''})
+            self.assertIsNot(orca_mod.Orca, herdr_term.Herdr)
+        started = []
+        self.dir.mkdir(parents=True)
+        self.assertEqual(bus.ensure_deliver(self.dir, {'backend': 'herdr'},
+                                            start=lambda argv, log: started.append(argv) or 99), 99)
+        self.assertEqual(started[0][-1], 'deliver')
+
+    def test_register_inside_herdr_records_the_pane_id(self):
+        run(['init'], self.root)
+        import orca_bus.orca as orca_mod
+        with mock.patch.object(orca_mod, 'Orca', orca_mod.Orca):
+            code, out = run(['register', 'worker-a', '--kind', 'claude'], self.root, **self.HERDR)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(Bus(self.dir).registry()['worker-a']['handle'], 'w2:p4')
+        with mock.patch.object(orca_mod, 'Orca', orca_mod.Orca):
+            _, out = run(['whoami'], self.root, **self.HERDR)
+        self.assertEqual(out.strip(), 'worker-a')
+
+
+class HerdrAdapterTest(unittest.TestCase):
+    PANES = {'result': {'panes': [
+        {'pane_id': 'w1:p1', 'agent': 'claude', 'agent_status': 'idle', 'terminal_title': 'claude', 'cwd': '/a'},
+        {'pane_id': 'w1:p2', 'agent': 'claude', 'agent_status': 'working', 'terminal_title': None, 'cwd': '/b'},
+        {'pane_id': 'w1:p3', 'agent': 'claude', 'agent_status': 'idle', 'terminal_title': '\u25d1 Fixing', 'cwd': '/c'},
+        {'pane_id': 'w1:p4', 'agent': None, 'agent_status': 'unknown', 'terminal_title': 'zsh', 'cwd': '/d'}]}}
+
+    def adapter(self, calls, outs):
+        import herdr_term
+
+        def fake(argv, **kw):
+            calls.append(argv[1:])
+            out = outs.get(tuple(argv[1:3]), '')
+            return subprocess.CompletedProcess(argv, 0, out, '')
+        self.patch = mock.patch.object(herdr_term.subprocess, 'run', fake)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        return herdr_term.Herdr(exe='/bin/herdr')
+
+    def test_terminals_titles_carry_the_agent_state_orca_bus_reads(self):
+        from orca_bus import tui
+        h = self.adapter([], {('pane', 'list'): json.dumps(self.PANES)})
+        t = h.terminals()
+        self.assertEqual(tui.title_state(t['w1:p1']['title']), 'idle')
+        self.assertEqual(tui.title_state(t['w1:p2']['title']), 'busy')
+        self.assertEqual(tui.title_state(t['w1:p3']['title']), 'busy')  # the agent's own title wins
+        self.assertEqual(t['w1:p4']['title'], 'zsh')                    # no agent: left alone
+        self.assertEqual((t['w1:p1']['agent'], t['w1:p1']['cwd']), ('claude', '/a'))
+
+    def test_send_types_text_and_raw_keys_and_screen_reads_the_visible_pane(self):
+        calls = []
+        h = self.adapter(calls, {('pane', 'read'): 'line 1\n> \n'})
+        self.assertTrue(h.send('w1:p1', '[bus abc] hello'))
+        self.assertTrue(h.send('w1:p1', '\r'))
+        self.assertTrue(h.send('w1:p1', '\x7f\x7f'))
+        self.assertEqual(calls, [['pane', 'send-text', 'w1:p1', '[bus abc] hello'], ['pane', 'send-keys', 'w1:p1', 'enter'],
+                                 ['pane', 'send-text', 'w1:p1', '\x7f\x7f']])
+        self.assertEqual(h.screen('w1:p1'), (['line 1', '> '], None))
+        self.assertEqual(calls[-1], ['pane', 'read', 'w1:p1', '--source', 'visible'])
+
+    def test_a_herdr_error_raises(self):
+        import herdr_term
+        h = self.adapter([], {('pane', 'list'): json.dumps({'error': {'code': 'server_not_running'}})})
+        with self.assertRaises(herdr_term.HerdrError):
+            h.terminals()
 
 
 if __name__ == '__main__':
