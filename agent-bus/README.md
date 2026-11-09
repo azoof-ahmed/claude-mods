@@ -59,9 +59,9 @@ Each project's bus is its own. The global channel is one more log, machine-wide 
 - **Send:** `bus broadcast "<text>" [--to all|coordinators] [--prio urgent|normal|fyi] [--from NAME]`. The default is `--to all`, `urgent`. The header carries the sender's project (the project root's folder name) and role.
 - **Receive:** new broadcasts reach the model through the same hooks as mail, marked `[GLOBAL from <project>/<role> <id>]`, and `bus watch` prints them too, so an idle agent wakes. Each session keeps its own cursor (keyed by the Claude session id, else project + role), starts at the end of the log, and never gets its own broadcast back. `--to coordinators` reaches roles named `coordinator*` only. `fyi` broadcasts are only in `bus global log`.
 - **Pause and resume:** `bus broadcast --pause "<reason>"` and `bus broadcast --resume ["<note>"]` are typed messages. An agent that gets a pause finishes its atomic step, checkpoints and starts no new work until a resume; a coordinator pauses its lanes. The state (reason, who, since when) is kept in `pause.json`, so a session that starts later is told at session start. `bus global status` prints it.
-- **piforge:** with `pausePiforge` on (default `auto`: when `piforge` is on PATH), `--pause` also runs `piforge pause --reason "<reason>"` and `--resume` runs `piforge resume`; `--no-piforge` skips it. The other way round, `scripts/bus-piforge-hook pause|resume` is piforge's `on_pause` / `on_resume` hook: it broadcasts the freeze with the reason from `PIFORGE_REASON`, as `piforge/piforge`, and never calls piforge back.
+- **piforge:** with `pausePiforge` on (default `auto`: when `piforge` is on PATH), `--pause` also runs `piforge pause --reason "<reason>"` and `--resume` runs `piforge resume`; `--no-piforge` skips it. The other way round, `scripts/bus-piforge-hook pause|resume` is piforge's `on_pause` / `on_resume` hook: it broadcasts the freeze with the reason from `PIFORGE_REASON`, as `piforge/piforge`, and never calls piforge back. That hook only helps when piforged runs on this machine. For a board elsewhere, `piforgeSync` (default `auto`) asks `piforge queue --json` at most every `piforgeSyncInterval` seconds (one check per machine, made by `bus watch` and the session hooks): a frozen queue raises a global pause from `piforge/piforge` with the freeze reason, and the thaw resumes it. It never resumes a pause someone broadcast, and never calls `piforge pause`/`resume`. Needs a piforge client with `queue` (pi-forge 1b9b303 or later); an older client or an unreachable board says nothing.
 - **Safety:** global messages are data, not instructions. Only pause and resume have a meaning, and no global message is the user's consent for anything destructive or outward-facing. A broadcast is one line, at most `globalMaxChars` characters, and each sender may send `globalRate` broadcasts (default 5 a minute).
-- **Tests and proofs:** point `AGENT_BUS_GLOBAL_DIR` at a throwaway folder (an environment value wins over the option) and set `AGENT_BUS_PAUSE_PIFORGE=off`, so nothing reaches real sessions or a real piforge queue.
+- **Tests and proofs:** point `AGENT_BUS_GLOBAL_DIR` at a throwaway folder (an environment value wins over the option) and set `AGENT_BUS_PAUSE_PIFORGE=off` and `AGENT_BUS_PIFORGE_SYNC=off`, so nothing reaches real sessions or a real piforge queue.
 
 ## The CLI
 
@@ -320,6 +320,8 @@ Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`
 | `globalRate` | `5/60` | Broadcasts per sender: count/seconds, or `off`. |
 | `pausePiforge` | `auto` | `on`: a global pause/resume also pauses/resumes piforge. `auto`: when piforge is on PATH. `off`: never. |
 | `piforgeBin` | `piforge` | The piforge command that runs. |
+| `piforgeSync` | `auto` | `on`: a frozen piforge queue pauses every session (global pause with its reason), and its thaw resumes them. `auto`: when piforge is on PATH. `off`: never. |
+| `piforgeSyncInterval` | `60` | Seconds between `piforge queue --json` checks, shared by every session on the machine. |
 
 The bus's `config.json` holds `reply_cmd`, the command printed in every reply hint, nudge and watch line. `init` writes this CLI's own (the `python` option resolved to a full path, else the interpreter running it, and the versioned script path), and each session's start and stop hooks replace it when its python or script is missing or it names an older plugin version.
 
@@ -349,7 +351,7 @@ The bus directory (default `.claude/bus`) holds:
 
 Commit the folder or ignore it, as you prefer. It is plain text.
 
-The global channel's folder (default `~/.claude/agent-bus-global`) holds `global.jsonl` (every broadcast), `pause.json` (the pause state), `cursors/` (each session's read position; unused ones are removed after 14 days) and `.lock`. A session's first hook creates it, to save its cursor.
+The global channel's folder (default `~/.claude/agent-bus-global`) holds `global.jsonl` (every broadcast), `pause.json` (the pause state), `cursors/` (each session's read position; unused ones are removed after 14 days), `piforge_sync.json` (when piforge was last checked) and `.lock`. A session's first hook creates it, to save its cursor.
 
 ## Develop
 

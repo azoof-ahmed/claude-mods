@@ -454,6 +454,13 @@ export const register: Register = (on, options) => {
     if (str(options.piforgeBin, 'piforge') !== '' && (await $.env.get('AGENT_BUS_PIFORGE_BIN')) === undefined) {
       await $.env.set('AGENT_BUS_PIFORGE_BIN', str(options.piforgeBin, 'piforge'))
     }
+    if (str(options.piforgeSync, 'auto') !== '' && (await $.env.get('AGENT_BUS_PIFORGE_SYNC')) === undefined) {
+      await $.env.set('AGENT_BUS_PIFORGE_SYNC', str(options.piforgeSync, 'auto'))
+    }
+    if ((await $.env.get('AGENT_BUS_PIFORGE_SYNC_INTERVAL')) === undefined) {
+      const iv = options.piforgeSyncInterval
+      await $.env.set('AGENT_BUS_PIFORGE_SYNC_INTERVAL', typeof iv === 'number' && iv > 0 ? String(iv) : str(iv, '60'))
+    }
     if (str(options.role, '') !== '' && (await $.env.get('AGENT_BUS_ROLE')) === undefined) {
       await $.env.set('AGENT_BUS_ROLE', str(options.role, ''))
     }
