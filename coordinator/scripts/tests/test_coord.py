@@ -134,6 +134,52 @@ class CoordTest(unittest.TestCase):
         _, out = self.run_cli('questions')
         self.assertIn('no open questions', out)
 
+    def test_coordinator_succession_closes_the_old_one_only_after_safe_to_close(self):
+        self.run_cli('init')
+        cards = self.root / '.claude/coord/lanes'
+        code, out = self.run_cli('succeed')
+        self.assertNotEqual(code, 0)  # no card yet
+        self.assertIn('write your card', out)
+        (cards / 'coordinator.md').write_text('## State\n- lanes a, b\n')
+        self.run_cli('spawn', 'coordinator', '--coordinator')
+        lanes = json.loads((cards / 'lanes.json').read_text())
+        lanes['coordinator'].update({'backend': 'tmux', 'handle': 'old-win'})
+        (cards / 'lanes.json').write_text(json.dumps(lanes))
+        code, out = self.run_cli('succeed')
+        self.assertEqual(code, 0, out)
+        lanes = json.loads((cards / 'lanes.json').read_text())
+        self.assertEqual(lanes['coordinator-prev']['state'], 'retiring')
+        self.assertEqual(lanes['coordinator-prev']['handle'], 'old-win')
+        self.assertEqual(lanes['coordinator']['state'], 'live')
+        self.assertEqual(lanes['coordinator']['kind'], 'coordinator')
+        self.assertEqual(lanes['coordinator']['brief'], '.claude/coord/briefs/COORDINATOR_RESUME.md')
+        self.assertTrue((self.root / lanes['coordinator']['brief']).exists())
+        # the old one has not said SAFE TO CLOSE: nothing is closed
+        closed = []
+        with mock.patch.object(coord, 'close_terminal', lambda cfg, lane, dry=False: closed.append(lane) or True):
+            code, out = self.run_cli('close-predecessor')
+            self.assertEqual(code, 1, out)
+            self.assertEqual(closed, [])
+            (cards / 'coordinator-prev.md').write_text('KEEP OPEN: merging\n')
+            self.assertEqual(self.run_cli('close-predecessor')[0], 1)
+            (cards / 'coordinator-prev.md').unlink()
+            self.assertEqual(self.run_cli('handed-over')[0], 0)
+            code, out = self.run_cli('close-predecessor')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(closed), 1)
+        lanes = json.loads((cards / 'lanes.json').read_text())
+        self.assertEqual(lanes['coordinator-prev']['state'], 'closed')
+        self.assertEqual(lanes['coordinator']['state'], 'live')
+
+    def test_succeed_refuses_a_second_unfinished_handover(self):
+        self.run_cli('init')
+        cards = self.root / '.claude/coord/lanes'
+        (cards / 'coordinator.md').write_text('## State\n- x\n')
+        self.assertEqual(self.run_cli('succeed')[0], 0)
+        code, out = self.run_cli('succeed')
+        self.assertNotEqual(code, 0)
+        self.assertIn('unfinished', out)
+
     def test_close_idle_only_closes_safe_lanes(self):
         self.run_cli('init')
         self.run_cli('spawn', 'done-lane')

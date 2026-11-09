@@ -83,9 +83,11 @@ You coordinate; workers do the work. Your context is the scarcest thing in the s
 - **Long-job logs:** START and END lines only. Progress lines come from the job's own script.
 - **Cheap reading:** index or TOC, then `rg`, then ranged reads. Whole files only under ~300 lines. With the code-index plugin, use its index and `md_toc`.
 - **Delegate.** Delegate reading-heavy investigations to a worker or subagent, and keep only its conclusion.
-- **Your own retirement:** retire like any lane when the plugin says so.
-  1. Write your own card: lanes, open questions, decisions pending, next actions.
-  2. Hand over to a successor coordinator.
+- **Your own retirement:** when the plugin says your context is full, hand over by yourself; never wait for the user to ask.
+  1. Write your own card `coordinator.md`: lanes, open questions, decisions pending, next actions.
+  2. Run `coord succeed`. It starts a new `coordinator` session in its own terminal on the coordinator resume brief; your lane becomes `coordinator-prev`.
+  3. Run `coord handed-over`, then end your turn with SAFE TO CLOSE.
+  4. The successor reads your card and runs `coord close-predecessor`, which closes your terminal only after your SAFE TO CLOSE. If you are the successor, do that first thing (the brief says so).
 - **Usage limits:**
   - At the weekly pause percentage (default 80%), run `/coordinator pause`. Lanes checkpoint their cards and stop, a resume list is written, and `/coordinator resume` brings them back from their cards. You stop last.
   - Keep `coord usage-watch --start` running so an idle coordinator is alerted too.

@@ -158,13 +158,29 @@ export function contextLines(c: CoordContext, cli: string): string[] {
 }
 
 /** A reminder once context passes the retirement threshold, again at each further step; undefined otherwise. */
-export function retireReminder(tokens: number, threshold: number, lastLevel: number): { level: number; text: string } | undefined {
+export function retireReminder(
+  tokens: number,
+  threshold: number,
+  lastLevel: number,
+  coordinator = false,
+): { level: number; text: string } | undefined {
   if (tokens < threshold) {
     return undefined
   }
   const level = Math.floor((tokens - threshold) / (threshold * RETIRE_STEP)) + 1
   if (level <= lastLevel) {
     return undefined
+  }
+  if (coordinator) {
+    return {
+      level,
+      text:
+        `coordinator: your context is at ${Math.round(tokens / 1000)}k tokens, past the ${Math.round(threshold / 1000)}k ` +
+        'retirement point. Hand over now, without waiting for the user: (1) write your card (lanes, open questions, ' +
+        'decisions pending, next 3 actions, anchors); (2) run `coord succeed`, which starts the successor coordinator in a ' +
+        'new terminal; (3) run `coord handed-over`, then end your turn with SAFE TO CLOSE. The successor closes this ' +
+        'terminal once it sees that. Do not run `succeed` twice.',
+    }
   }
   return {
     level,
@@ -309,7 +325,7 @@ export const register: Register = (on, options) => {
     const usage = await $.session.usage()
     const notes: string[] = []
     const tokens = usage.context.tokens ?? 0
-    const reminder = retireReminder(tokens, ctx.retireTokens, retireLevel)
+    const reminder = retireReminder(tokens, ctx.retireTokens, retireLevel, ctx.isCoordinator)
     if (reminder !== undefined) {
       retireLevel = reminder.level
       notes.push(reminder.text)
