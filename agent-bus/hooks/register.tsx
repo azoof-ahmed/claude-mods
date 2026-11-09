@@ -12,6 +12,8 @@ type HookOut = {
   watch?: boolean
   registered?: boolean
   cli?: string
+  /** The machine-wide global channel's log; its size changing means a broadcast arrived. Absent: channel off. */
+  globalLog?: string
 }
 
 type $T = EngineInterface
@@ -70,8 +72,10 @@ async function runBus($: $T, python: string, args: string[], timeoutMs: number) 
 }
 
 /** Asks bus.py for this session's mail and state at a hook event. */
-async function hook($: $T, python: string, event: string): Promise<HookOut> {
-  const ran = await runBus($, python, ['hook', '--event', event], 15000)
+async function hook($: $T, python: string, event: string, session?: string): Promise<HookOut> {
+  // The session id keys this session's own cursor on the global channel.
+  const args = ['hook', '--event', event, ...(session ? ['--session', session] : [])]
+  const ran = await runBus($, python, args, 15000)
   if (ran.exitCode !== 0) {
     throw new Error(`bus.py hook exited ${ran.exitCode}: ${ran.stderr.trim().slice(0, 300)}`)
   }
@@ -91,7 +95,7 @@ export function noBusText(dir: string | undefined): string {
 export const BUS_VERBS = [
   'pane', 'full', 'tui', 'chat', 'init', 'send', 'digest', 'read', 'inbox', 'ack', 'watch', 'react', 'thread',
   'sub', 'unsub', 'pin', 'unpin', 'edit', 'delete', 'status', 'who', 'register', 'unregister', 'deliver',
-  'snapshot', 'whoami', 'watch-live',
+  'snapshot', 'whoami', 'watch-live', 'broadcast', 'global',
 ] as const
 
 export const BUS_HELP = [
@@ -407,6 +411,7 @@ export const register: Register = (on, options) => {
   // Module state: a reload starts it over, which only costs one extra look at the inbox.
   let known: HookOut | undefined
   let lastSize = -1
+  let lastGlobalSize = -1
   let callsSinceLook = 0
   let lastReminder = 0
 
@@ -428,6 +433,26 @@ export const register: Register = (on, options) => {
     }
     if (str(options.tasksDb, '') !== '') {
       await $.env.set('AGENT_BUS_TASKS_DB', str(options.tasksDb, ''))
+    }
+    // The global channel's options. An environment value already set wins, so a test or a live proof can point a
+    // session at a throwaway global dir without touching the real one.
+    if (str(options.global, 'on') !== '' && (await $.env.get('AGENT_BUS_GLOBAL')) === undefined) {
+      await $.env.set('AGENT_BUS_GLOBAL', str(options.global, 'on'))
+    }
+    if (str(options.globalDir, '') !== '' && (await $.env.get('AGENT_BUS_GLOBAL_DIR')) === undefined) {
+      await $.env.set('AGENT_BUS_GLOBAL_DIR', str(options.globalDir, ''))
+    }
+    if (String(options.globalMaxChars ?? 1000) !== '' && (await $.env.get('AGENT_BUS_GLOBAL_MAX_CHARS')) === undefined) {
+      await $.env.set('AGENT_BUS_GLOBAL_MAX_CHARS', String(options.globalMaxChars ?? 1000))
+    }
+    if (str(options.globalRate, '5/60') !== '' && (await $.env.get('AGENT_BUS_GLOBAL_RATE')) === undefined) {
+      await $.env.set('AGENT_BUS_GLOBAL_RATE', str(options.globalRate, '5/60'))
+    }
+    if (str(options.pausePiforge, 'auto') !== '' && (await $.env.get('AGENT_BUS_PAUSE_PIFORGE')) === undefined) {
+      await $.env.set('AGENT_BUS_PAUSE_PIFORGE', str(options.pausePiforge, 'auto'))
+    }
+    if (str(options.piforgeBin, 'piforge') !== '' && (await $.env.get('AGENT_BUS_PIFORGE_BIN')) === undefined) {
+      await $.env.set('AGENT_BUS_PIFORGE_BIN', str(options.piforgeBin, 'piforge'))
     }
     if (str(options.role, '') !== '' && (await $.env.get('AGENT_BUS_ROLE')) === undefined) {
       await $.env.set('AGENT_BUS_ROLE', str(options.role, ''))
@@ -701,10 +726,12 @@ export const register: Register = (on, options) => {
 
   on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
-    const out = await hook($, python, 'SessionStart')
+    const out = await hook($, python, 'SessionStart', sessionOf(e))
     known = out
+    lastGlobalSize = await sizeOf($, out.globalLog)
     if (!out.bus) {
-      return result
+      // No project bus: only the global channel (a pause in force, or a broadcast) can have something to say.
+      return out.text ? { ...result, additionalContext: [...(result.additionalContext ?? []), out.text] } : result
     }
     const lines: string[] = []
     if (!out.role) {
@@ -730,7 +757,13 @@ export const register: Register = (on, options) => {
   on('classic.PostToolUse', async ($, e, next) => {
     const result = await next(e)
     callsSinceLook += 1
-    if (known !== undefined && (!known.bus || !known.role)) {
+    // A broadcast on the global channel reaches every session at once, bus or no bus.
+    const gsize = await sizeOf($, known?.globalLog)
+    const globalGrew = gsize !== lastGlobalSize
+    lastGlobalSize = gsize
+    if (globalGrew && known?.globalLog) {
+      // fall through to the hook below
+    } else if (known !== undefined && (!known.bus || !known.role)) {
       // No bus or no role yet: look again now and then (a tab may register mid-session).
       if (callsSinceLook < RECHECK_ROLE_EVERY) {
         return result
@@ -748,7 +781,7 @@ export const register: Register = (on, options) => {
       }
     }
     callsSinceLook = 0
-    const out = await hook($, python, 'PostToolUse')
+    const out = await hook($, python, 'PostToolUse', sessionOf(e))
     known = out
     if (!out.text) {
       return result
@@ -761,10 +794,10 @@ export const register: Register = (on, options) => {
     if (e.stop_hook_active || result.block !== undefined) {
       return result // already kept going once: let the agent stop
     }
-    const out = await hook($, python, 'Stop')
+    const out = await hook($, python, 'Stop', sessionOf(e))
     known = out
     if (!out.bus || !out.role) {
-      return result
+      return out.text ? { ...result, block: out.text } : result // only global mail can be here
     }
     if (out.text) {
       return { ...result, block: out.text }
@@ -776,6 +809,22 @@ export const register: Register = (on, options) => {
     }
     return result
   }).catch(($, e, next) => next(e))
+}
+
+/** The Claude session id from a hook event, when the event carries one. */
+function sessionOf(e: unknown): string | undefined {
+  const id = (e as { session_id?: unknown } | null)?.session_id
+  return typeof id === 'string' && id ? id : undefined
+}
+
+/** A file's size, or -1 when there is no such file (or no path). */
+async function sizeOf($: $T, path: string | undefined): Promise<number> {
+  if (!path) return -1
+  try {
+    return (await $.fs.stat(path)).size
+  } catch {
+    return -1
+  }
 }
 
 function age(sec: number): string {

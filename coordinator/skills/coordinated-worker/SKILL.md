@@ -27,7 +27,7 @@ description: Work as one lane of a coordinated multi-agent project. Use when you
 - **When idle:** arm the bus watch Monitor if the context asks. Do not poll.
 
 ## Pausing
-When the coordinator sends PAUSE (a usage limit):
+When the coordinator sends PAUSE (a usage limit), or a `[GLOBAL PAUSE ...]` line arrives on the bus (machine-wide, with its reason):
 1. Finish or park your atomic step.
 2. Update your card.
 3. Release any scheduler slot.
