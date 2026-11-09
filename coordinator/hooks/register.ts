@@ -180,6 +180,19 @@ const COMMAND_DESCRIPTION =
 const COMMAND_HINT =
   '[init|status|lanes|spawn <role> [brief]|retire <role>|respawn <role>|close-idle|questions|answer <id> <text>|preflight|usage|pause|resume]'
 
+/** Runs `/coord <verb>`; returns the CLI's text and the fresh context (for the status line). */
+async function runCommandVerb($: EngineInterface, python: string, typed: string): Promise<{ text: string; ctx: CoordContext | undefined }> {
+  const args = typed === '' ? ['status'] : typed.split(/\s+/)
+  const ran = await runCoord($, python, args, 120000)
+  const text = [ran.stdout.trim(), ran.stderr.trim()].filter(t => t !== '').join('\n')
+  const c = await readContext($, python)
+  const line = statusLine(c)
+  if (line !== undefined) {
+    $.ui.status(line)
+  }
+  return { text: text === '' ? `coordinator ${args.join(' ')}: done` : text, ctx: c }
+}
+
 export const register: Register = (on, options) => {
   const python = str(options.python, 'python')
 
@@ -238,21 +251,16 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  const runCommand = async ($: EngineInterface, e: { args: string }) => {
-    const typed = e.args.trim()
-    const args = typed === '' ? ['status'] : typed.split(/\s+/)
-    const ran = await runCoord($, python, args, 120000)
-    const text = [ran.stdout.trim(), ran.stderr.trim()].filter(t => t !== '').join('\n')
-    const c = await readContext($, python)
-    ctx = c ?? ctx
-    const line = statusLine(c)
-    if (line !== undefined) {
-      $.ui.status(line)
-    }
-    return { text: text === '' ? `coordinator ${args.join(' ')}: done` : text }
-  }
-  on('command.run', { command: 'coord' }, runCommand)
-  on('command.run', { command: 'coordinator' }, runCommand)
+  on('command.run', { command: 'coord' }, async ($, e) => {
+    const r = await runCommandVerb($, python, e.args.trim())
+    ctx = r.ctx ?? ctx
+    return { text: r.text }
+  })
+  on('command.run', { command: 'coordinator' }, async ($, e) => {
+    const r = await runCommandVerb($, python, e.args.trim())
+    ctx = r.ctx ?? ctx
+    return { text: r.text }
+  })
 
   on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
