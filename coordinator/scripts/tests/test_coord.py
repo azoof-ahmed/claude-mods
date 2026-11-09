@@ -18,7 +18,7 @@ REAL_HERDR_PANES = coord.herdr_panes
 CLEAN = {coord.env_key(k): '' for k in coord.DEFAULTS}
 CLEAN.update({'AGENT_BUS_ROLE': '', 'AGENT_BUS_CLI': os.devnull + '-missing',
               # the tests run inside Orca, herdr or tmux: none of that may leak into `auto`
-              'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
+              'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'HERDR_SESSION': '', 'HERDR_SOCKET_PATH': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
 
 
 class CoordTest(unittest.TestCase):
@@ -179,6 +179,43 @@ class CoordTest(unittest.TestCase):
         code, out = self.run_cli('succeed')
         self.assertNotEqual(code, 0)
         self.assertIn('unfinished', out)
+
+    def test_herdr_calls_are_pinned_to_the_session_this_shell_runs_in(self):
+        seen = []
+
+        def fake(argv, **kw):
+            seen.append(argv)
+            return coord.subprocess.CompletedProcess(argv, 0, '{}', '')
+        with mock.patch.object(coord.subprocess, 'run', fake):
+            coord.run(['herdr', 'pane', 'list'])
+            self.assertEqual(seen[-1], ['herdr', 'pane', 'list'])  # nothing known: left to herdr
+            with mock.patch.dict(os.environ, {'HERDR_SESSION': 'clarity'}):
+                coord.run(['herdr', 'pane', 'list'])
+                self.assertEqual(seen[-1], ['herdr', '--session', 'clarity', 'pane', 'list'])
+            with mock.patch.dict(os.environ, {'HERDR_SOCKET_PATH': '/h/sessions/avas-app/herdr.sock'}):
+                coord.run(['herdr', 'tab', 'list'])
+                self.assertEqual(seen[-1][:3], ['herdr', '--session', 'avas-app'])
+            with mock.patch.dict(os.environ, {'HERDR_SOCKET_PATH': '/h/herdr.sock'}):
+                self.assertEqual(coord.herdr_session(), 'default')
+            # a lane is closed in the session it was opened in, whatever this shell runs in
+            lane = {'role': 'w', 'backend': 'herdr', 'handle': 'w1:p2', 'session': 'polygon-mv'}
+            with mock.patch.dict(os.environ, {'HERDR_SESSION': 'clarity'}), \
+                    mock.patch.object(coord, 'herdr_locate', lambda l, dry=False: {'pane_id': 'w1:p2', 'tab_id': 'w1:t2'}), \
+                    mock.patch.object(coord, 'reap_lane', lambda cfg, l, dry=False: ([], [])):
+                coord.close_terminal(coord.Config(self.root), lane)
+                self.assertEqual(seen[-1], ['herdr', '--session', 'polygon-mv', 'tab', 'close', 'w1:t2'])
+        self.assertIsNone(coord.HERDR_PIN['session'])
+
+    def test_herdr_spawn_refuses_to_guess_between_sessions(self):
+        with mock.patch.object(coord, 'herdr_session_names', lambda: ['default', 'clarity']), \
+                mock.patch.object(coord.shutil, 'which', lambda n: '/bin/herdr'):
+            with self.assertRaises(SystemExit) as ex:
+                coord.require_herdr_session()
+            self.assertIn('cannot tell which herdr session', str(ex.exception))
+            with mock.patch.dict(os.environ, {'HERDR_SESSION': 'clarity'}):
+                coord.require_herdr_session()  # known: fine
+        with mock.patch.object(coord, 'herdr_session_names', lambda: ['default']):
+            coord.require_herdr_session()  # only one runs: nothing to guess
 
     def test_close_idle_only_closes_safe_lanes(self):
         self.run_cli('init')

@@ -189,3 +189,6 @@ claude --plugin-dir ./coordinator
 ## License
 
 MIT
+
+
+**herdr sessions:** every herdr call is pinned with `--session` (from `HERDR_SESSION` or `HERDR_SOCKET_PATH`); lanes record and are closed in their own session; a successor coordinator opens in the old one's session; with no session known and several running, `spawn` refuses (`--herdr-session NAME` sets it).

@@ -4,6 +4,7 @@
     python coord.py spawn <role> [<brief>] [--repo P] [--model M] [--coordinator] [--dry-run]
                                                         start a worker on a brief (default: the resume brief);
                                                         --coordinator (or role `coordinator`) skips maxLanes
+    (any verb) --herdr-session NAME                      pin herdr calls to this session (default: the one this shell runs in)
     python coord.py succeed [--model M] [--dry-run]     (the coordinator) start the successor coordinator on its card
     python coord.py handed-over                         (the old coordinator) say SAFE TO CLOSE after `succeed`
     python coord.py close-predecessor [--wait S]        (the successor) close the old coordinator once it said SAFE TO CLOSE
@@ -297,7 +298,41 @@ def worker_command(cfg, role, brief, model=None):
     return cfg['workerCommand'].format(**vals)
 
 
+# ---- herdr sessions. `herdr <cmd>` talks to the session named by HERDR_SOCKET_PATH / HERDR_SESSION, and to the
+# `default` session when neither is set (a shell without them, a daemon, an agent run through a wrapper). Pane ids
+# (w1:p3) repeat across sessions, so a lane belongs to the session it was opened in, and every herdr call is pinned.
+
+HERDR_PIN = {'session': None}
+
+
+def herdr_env_session(env=None):
+    """The herdr session this process runs in, from its environment; None when it cannot tell."""
+    env = os.environ if env is None else env
+    if env.get('HERDR_SESSION'):
+        return env['HERDR_SESSION']
+    sock = env.get('HERDR_SOCKET_PATH')
+    if sock:
+        d = Path(sock).parent
+        return d.name if d.parent.name == 'sessions' else 'default'
+    return None
+
+
+def herdr_session():
+    """The session herdr calls are pinned to: an explicit pin (a lane's own session), else this process's."""
+    return HERDR_PIN['session'] or herdr_env_session()
+
+
+def with_herdr_session(argv):
+    """`herdr --session NAME <cmd>` when the session is known (calls that name one already are left alone)."""
+    if argv and argv[0] == 'herdr' and '--session' not in argv:
+        name = herdr_session()
+        if name:
+            return [argv[0], '--session', name, *argv[1:]]
+    return argv
+
+
 def run(argv, dry=False, **kw):
+    argv = with_herdr_session(argv)
     if dry:
         print('would run: ' + ' '.join(shlex.quote(a) for a in argv))
         return subprocess.CompletedProcess(argv, 0, '{}', '')
@@ -375,6 +410,29 @@ def same_path(a, b):
         return a == b
 
 
+def herdr_session_names():
+    """Names of the running herdr sessions (`herdr session list`), or None when they cannot be listed."""
+    if not shutil.which('herdr'):
+        return None
+    try:
+        r = subprocess.run(['herdr', 'session', 'list'], capture_output=True, **TEXT)
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    return [ln.split()[0] for ln in r.stdout.splitlines()[1:] if len(ln.split()) > 1 and ln.split()[1] == 'running']
+
+
+def require_herdr_session(dry=False):
+    """Never open a tab in a guessed session: with no session known and several running, `herdr` would use `default`."""
+    if dry or herdr_session():
+        return
+    names = herdr_session_names() or []
+    if len(names) > 1:
+        raise SystemExit('coordinator: cannot tell which herdr session this is (no HERDR_SESSION or HERDR_SOCKET_PATH) and '
+                         f'{len(names)} run ({", ".join(names)}); pass --herdr-session NAME or set HERDR_SESSION')
+
+
 def herdr_workspace(repo, dry=False):
     """The herdr workspace whose pane runs in `repo`, else a new one labelled after the repo (not focused)."""
     for key in ('cwd', 'foreground_cwd'):
@@ -430,6 +488,16 @@ def herdr_live_handles(dry=False):
 
 
 def herdr_locate(lane, dry=False):
+    """The live pane of a herdr lane, looked up in the lane's own session."""
+    old = HERDR_PIN['session']
+    HERDR_PIN['session'] = lane.get('session') or old
+    try:
+        return herdr_locate_pinned(lane, dry)
+    finally:
+        HERDR_PIN['session'] = old
+
+
+def herdr_locate_pinned(lane, dry=False):
     """The live pane of a herdr lane: by its terminal id first, then its pane id. {} when it is gone, None when
     herdr can't be asked."""
     panes = herdr_panes(dry)
@@ -462,6 +530,7 @@ def open_terminal(cfg, role, repo, cmd, dry=False):
     b = cfg.backend
     if b == 'herdr':
         # a tab in the repo's workspace; its env carries the lane marker, so no prefix is typed before the command
+        require_herdr_session(dry)
         ws = herdr_workspace(repo, dry)
         pane = herdr_open_tab(ws, repo, role, [f'AGENT_BUS_ROLE={role}', f'COORD_LANE={lane_key(cfg, role)}'], dry)
         handle = pane.get('pane_id')
@@ -511,7 +580,16 @@ def open_terminal(cfg, role, repo, cmd, dry=False):
 
 
 def close_terminal(cfg, lane, dry=False):
-    """Close the lane's terminal, then reap any tmux session still running it (see reap_lane)."""
+    """Close the lane's terminal (in the herdr session it was opened in), then reap any tmux session still running it."""
+    old = HERDR_PIN['session']
+    HERDR_PIN['session'] = lane.get('session') or old
+    try:
+        return close_terminal_pinned(cfg, lane, dry)
+    finally:
+        HERDR_PIN['session'] = old
+
+
+def close_terminal_pinned(cfg, lane, dry=False):
     h, how = lane.get('handle'), lane.get('backend')
     ok = False
     if how == 'orca' and h:
@@ -836,6 +914,8 @@ def cmd_spawn(cfg, args):
     gen = lanes.get(role, {}).get('generation', 0) + 1
     lanes[role] = {'role': role, 'brief': brief, 'repo': repo, 'backend': how, 'handle': handle, 'state': 'live',
                    'started': now(), 'generation': gen, 'model': model or cfg['workerModel']}
+    if how == 'herdr' and herdr_session():
+        lanes[role]['session'] = herdr_session()
     if how == 'herdr' and handle in HERDR_OPENED:
         lanes[role].update({k: v for k, v in HERDR_OPENED[handle].items() if v})
     if coordinator:
@@ -904,6 +984,12 @@ def cmd_succeed(cfg, args):
     how, handle = own_terminal()
     if handle:  # what this session knows about its own terminal beats a stale record
         old.update({'backend': how, 'handle': handle})
+    if how == 'herdr':
+        # the successor opens beside the old coordinator: in the session this one runs in, never a guessed one
+        mine = herdr_env_session() or old.get('session')
+        if mine:
+            old['session'] = mine
+            HERDR_PIN['session'] = HERDR_PIN['session'] or mine
     old.update({'role': PREDECESSOR, 'kind': 'coordinator', 'state': 'retiring', 'retired': now()})
     lanes.pop('coordinator', None)
     lanes[PREDECESSOR] = old
@@ -1809,6 +1895,7 @@ def main(argv=None):
         if v:
             flags[k] = v
     cfg = Config(project_root(), flags)
+    HERDR_PIN['session'] = take(args, '--herdr-session') or None
     verb = args.pop(0)
     if verb == 'config':
         print(json.dumps({k: cfg[k] for k in DEFAULTS}, indent=1))
