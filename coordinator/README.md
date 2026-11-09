@@ -49,7 +49,7 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 
 ## Commands
 
-`/coordinator <verb>` runs `coord.py <verb>`. Sessions also get the CLI as `$COORD_CLI`.
+`/coord <verb>` (also `/coordinator <verb>`) runs `coord.py <verb>`. Use `/coord` when typing `/coordinator` completes to the skill `/coordinator:coordinator`. Sessions also get the CLI as `$COORD_CLI`.
 
 | Verb | What it does |
 | --- | --- |
@@ -138,7 +138,7 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
   - in the coordinator session, at `pauseWeeklyPercent` of the weekly window, it adds a "start the graceful pause"
     note and a toast, once per crossing;
   - in every session, at `pauseSessionPercent` of the 5-hour window, it adds a checkpoint-and-pause notice.
-- **The status line** shows `coord: N/M lanes, Q question(s)` in the coordinator session.
+- **The status line** shows `coord: N/M lanes, Q question(s)` in the coordinator session. A session that started before the project was set up re-reads the context every 5 tool calls, so the line (and the start-up lines) appear without a restart.
 
 ## Usage watcher and graceful pause
 
