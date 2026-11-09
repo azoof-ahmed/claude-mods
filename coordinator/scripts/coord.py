@@ -42,7 +42,7 @@ TEMPLATES = HERE.parent / 'templates'
 
 DEFAULTS = {
     'repos': '.',
-    'backend': 'manual',              # orca | tmux | wt | manual
+    'backend': 'manual',              # auto | orca | herdr | tmux | wt | manual
     'shell': 'auto',                  # auto | posix | powershell | cmd: how the env prefix is written
     'workerCommand': 'claude --model {model} "{prompt}"',
     'workerPrompt': 'Read {brief} and execute it. Your role is {role}.',
@@ -68,6 +68,20 @@ INTS = ('maxLanes', 'retireTokens', 'pauseSessionPercent', 'pauseWeeklyPercent',
 FLOATS_EXTRA = ('pauseReminderMin', 'pauseGraceMin')
 FLOATS = ('minFreeRamGb',)
 PATHS = ('busDir', 'trackerDb', 'rulesFile', 'briefsDir', 'cardsDir', 'reportsDir')
+BACKENDS = ('auto', 'orca', 'herdr', 'tmux', 'wt', 'manual')
+
+
+def detect_backend(env=None):
+    """`auto`: herdr inside a herdr pane (HERDR_ENV=1), orca inside an Orca terminal, tmux inside tmux, else manual.
+    herdr is checked first: a herdr pane that runs the agent inside tmux (claude-auto-retry) still has HERDR_ENV."""
+    env = os.environ if env is None else env
+    if env.get('HERDR_ENV') == '1' and env.get('HERDR_PANE_ID'):
+        return 'herdr'
+    if env.get('ORCA_TERMINAL_HANDLE'):
+        return 'orca'
+    if env.get('TMUX'):
+        return 'tmux'
+    return 'manual'
 
 
 # Child output is UTF-8 (orca, claude, the bus); the Windows locale codepage (cp1252) cannot decode it.
@@ -115,8 +129,14 @@ class Config(dict):
             self[k] = int(self[k])
         for k in FLOATS + FLOATS_EXTRA:
             self[k] = float(self[k])
-        if self['backend'] not in ('orca', 'tmux', 'wt', 'manual'):
-            raise SystemExit(f"coordinator: backend must be orca, tmux, wt or manual, not {self['backend']!r}")
+        if self['backend'] not in BACKENDS:
+            raise SystemExit(f"coordinator: backend must be {', '.join(BACKENDS[:-1])} or manual, "
+                             f"not {self['backend']!r}")
+
+    @property
+    def backend(self):
+        """The backend in effect: `auto` resolves to the terminal this session runs in (see detect_backend)."""
+        return detect_backend() if self['backend'] == 'auto' else self['backend']
 
     def path(self, key):
         p = Path(self[key])
@@ -318,9 +338,137 @@ def orca_close_by_title(repo, title, before=frozenset(), dry=False):
     return closed
 
 
+# ---- herdr: workspaces hold tabs, a tab holds panes. A lane is one tab in the workspace whose cwd is its repo; its
+# handle is the tab's root pane id (w1:p3). Pane ids are stable while the herdr server runs but may be renumbered when
+# it restarts, so the lane also keeps the pane's terminal_id, and every lookup tries that first.
+
+HERDR_OPENED = {}  # pane id -> {'tab', 'terminal'} for the panes open_terminal created in this process
+
+
+def herdr_json(argv, dry=False):
+    """(CompletedProcess, result dict) for `herdr <argv>`; the result is {} when the output is not herdr's JSON."""
+    r = run(['herdr', *argv], dry)
+    try:
+        res = json.loads(r.stdout or '{}')
+    except ValueError:
+        return r, {}
+    return r, (res.get('result') if isinstance(res, dict) and isinstance(res.get('result'), dict) else {})
+
+
+def herdr_panes(dry=False):
+    """Every pane of the running herdr server as dicts, or None when herdr can't be asked."""
+    if dry or not shutil.which('herdr'):
+        return None
+    r, res = herdr_json(['pane', 'list'])
+    if r.returncode != 0 or not isinstance(res.get('panes'), list):
+        return None
+    return [p for p in res['panes'] if isinstance(p, dict)]
+
+
+def same_path(a, b):
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except (TypeError, ValueError, OSError):
+        return a == b
+
+
+def herdr_workspace(repo, dry=False):
+    """The herdr workspace whose pane runs in `repo`, else a new one labelled after the repo (not focused)."""
+    for key in ('cwd', 'foreground_cwd'):
+        for p in herdr_panes(dry) or []:
+            if p.get(key) and p.get('workspace_id') and same_path(p[key], repo):
+                return p['workspace_id']
+    r, res = herdr_json(['workspace', 'create', '--cwd', repo, '--label', Path(repo).name or repo, '--no-focus'], dry)
+    ws = (res.get('workspace') or {}).get('workspace_id')
+    if not ws and not dry:
+        raise SystemExit(f'coordinator: herdr workspace create failed: {r.stderr.strip() or r.stdout.strip()}')
+    return ws or '<workspace>'
+
+
+def herdr_tabs_labelled(ws, label):
+    """Tab ids labelled `label` in workspace `ws`."""
+    r, res = herdr_json(['tab', 'list', '--workspace', ws])
+    return {t['tab_id'] for t in res.get('tabs') or [] if isinstance(t, dict) and t.get('label') == label
+            and t.get('tab_id')}
+
+
+def herdr_close_by_label(ws, label, before=frozenset()):
+    """Close the tabs labelled `label` in `ws` that were not in `before`: a create whose output could not be read."""
+    closed = 0
+    for t in sorted(herdr_tabs_labelled(ws, label) - set(before)):
+        if run(['herdr', 'tab', 'close', t]).returncode == 0:
+            closed += 1
+    return closed
+
+
+def herdr_open_tab(ws, repo, label, env=(), dry=False):
+    """A new tab in `ws`: returns its root pane dict (pane_id, tab_id, terminal_id), or raises SystemExit.
+    A tab whose create output could not be read is found by its label and closed, so none is left behind."""
+    before = set() if dry else herdr_tabs_labelled(ws, label)
+    args = ['tab', 'create', '--workspace', ws, '--cwd', repo, '--label', label]
+    for e in env:
+        args += ['--env', e]
+    r, res = herdr_json(args + ['--no-focus'], dry)
+    pane = dict(res.get('root_pane') or {})
+    pane.setdefault('tab_id', (res.get('tab') or {}).get('tab_id'))
+    if not pane.get('pane_id') and not dry:
+        if r.returncode == 0:
+            herdr_close_by_label(ws, label, before)
+        raise SystemExit(f'coordinator: herdr tab create failed: {r.stderr.strip() or r.stdout.strip()}')
+    return pane
+
+
+def herdr_live_handles(dry=False):
+    """Pane ids and terminal ids of every live herdr pane, or None when herdr can't be asked."""
+    panes = herdr_panes(dry)
+    if panes is None:
+        return None
+    return {p[k] for p in panes for k in ('pane_id', 'terminal_id') if p.get(k)}
+
+
+def herdr_locate(lane, dry=False):
+    """The live pane of a herdr lane: by its terminal id first, then its pane id. {} when it is gone, None when
+    herdr can't be asked."""
+    panes = herdr_panes(dry)
+    if panes is None:
+        return None
+    term, h = lane.get('terminal'), lane.get('handle')
+    for p in panes:
+        if term and p.get('terminal_id') == term:
+            return p
+    p = next((p for p in panes if h and p.get('pane_id') == h), None)
+    if not p:
+        return {}
+    if lane.get('role'):
+        # the pane id may be another pane's after a restart: take it only when its tab still carries the lane's name
+        _, res = herdr_json(['tab', 'get', p.get('tab_id') or ''])
+        if (res.get('tab') or {}).get('label') != lane.get('role'):
+            return {}
+    return p
+
+
+def herdr_screen(h, dry=False):
+    """The visible screen of herdr pane `h` as text."""
+    out = run(['herdr', 'pane', 'read', h, '--source', 'visible'], dry).stdout or ''
+    save_debug(out, out)
+    return out
+
+
 def open_terminal(cfg, role, repo, cmd, dry=False):
     """Start `cmd` for `role` in a new terminal; returns (handle, how). The worker's env carries AGENT_BUS_ROLE."""
-    b = cfg['backend']
+    b = cfg.backend
+    if b == 'herdr':
+        # a tab in the repo's workspace; its env carries the lane marker, so no prefix is typed before the command
+        ws = herdr_workspace(repo, dry)
+        pane = herdr_open_tab(ws, repo, role, [f'AGENT_BUS_ROLE={role}', f'COORD_LANE={lane_key(cfg, role)}'], dry)
+        handle = pane.get('pane_id')
+        s = run(['herdr', 'pane', 'run', handle or '<pane>', cmd], dry)
+        if s.returncode != 0 and not dry:
+            run(['herdr', 'tab', 'close', pane.get('tab_id') or handle])
+            raise SystemExit(f'coordinator: herdr pane run failed: {s.stderr.strip() or s.stdout.strip()}')
+        if handle:
+            HERDR_OPENED[handle] = {'tab': pane.get('tab_id'), 'terminal': pane.get('terminal_id')}
+        return handle, 'herdr'
     if b == 'orca':
         # Open a plain shell, then type the worker command into it. `create --command <interactive TUI>` makes
         # orca time out waiting for the handle ("Timed out waiting for terminal handle after creation") once
@@ -365,6 +513,17 @@ def close_terminal(cfg, lane, dry=False):
     ok = False
     if how == 'orca' and h:
         ok = run(['orca', 'terminal', 'close', '--terminal', h, '--tab'], dry).returncode == 0
+    elif how == 'herdr' and h:
+        if dry:
+            ok = run(['herdr', 'tab', 'close', lane.get('tab') or h], dry).returncode == 0
+        else:
+            pane = herdr_locate(lane)
+            if pane is None:
+                print(f'{lane.get("role")}: herdr is not reachable; close its tab yourself.')
+            elif not pane:
+                ok = True  # the tab is already gone
+            else:
+                ok = run(['herdr', 'tab', 'close', pane.get('tab_id') or pane['pane_id']]).returncode == 0
     elif how == 'tmux' and h:
         ok = run(['tmux', 'kill-window', '-t', h], dry).returncode == 0
     else:
@@ -381,8 +540,8 @@ def close_terminal(cfg, lane, dry=False):
 #
 # A `claude` wrapper such as claude-auto-retry runs the agent inside its own tmux session and only attaches the
 # terminal to it. Closing the terminal detaches the session; the agent keeps working beside its successor. The
-# session's environment still names the lane: COORD_LANE (with_env sets it; older workers carry only
-# AGENT_BUS_ROLE) and ORCA_TERMINAL_HANDLE.
+# session's environment still names the lane: COORD_LANE (with_env or the herdr tab env sets it; older workers carry
+# only AGENT_BUS_ROLE) and the terminal's handle: ORCA_TERMINAL_HANDLE, or HERDR_PANE_ID inside herdr.
 
 def proc_table():
     """{pid: (ppid, start time)} for every process; the start time tells a pid from a later reuse of it."""
@@ -427,9 +586,11 @@ def tmux_sessions(dry=False):
             p = todo.pop()
             pids.append(p)
             todo.extend(children.get(p, []))
+        herdr = env.get('HERDR_ENV') == '1' and bool(env.get('HERDR_PANE_ID'))
         out.append({'id': sid, 'name': name, 'attached': attached.strip() not in ('', '0'),
                     'role': env.get('AGENT_BUS_ROLE'), 'lane': env.get('COORD_LANE'),
-                    'handle': env.get('ORCA_TERMINAL_HANDLE'), 'pids': pids,
+                    'handle': env.get('HERDR_PANE_ID') if herdr else env.get('ORCA_TERMINAL_HANDLE'),
+                    'herdr': herdr, 'pids': pids,
                     'starts': {p: procs[p][1] for p in pids if p in procs}})
     return out
 
@@ -488,7 +649,9 @@ def lane_sessions(cfg, lane, sessions):
     key = lane_key(cfg, role) if role else None
 
     def ours(s):
-        if h and s['handle'] == h:
+        # a herdr pane id can name another pane after a herdr restart, so it never matches alone: herdr lanes
+        # always carry COORD_LANE, which the next line checks
+        if h and s['handle'] == h and not s.get('herdr'):
             return True
         return bool(role) and (s['lane'] == key if s.get('lane') else s['role'] == role)
     return [s for s in sessions if not mine & set(s['pids']) and ours(s)]
@@ -514,6 +677,28 @@ def orca_live_handles(dry=False):
     return {t['handle'] for t in terms if isinstance(t, dict) and t.get('handle')}
 
 
+def live_handles(lanes, dry=False):
+    """Handles of every live terminal of the backends these lanes use (orca handles; herdr pane and terminal ids),
+    or None when no lane has one or a backend can't be asked: liveness is then unknown, so nothing is reconciled."""
+    used = {l.get('backend') for l in lanes.values() if l.get('handle')} & {'orca', 'herdr'}
+    if not used:
+        return None
+    out = set()
+    for b, ask in (('orca', orca_live_handles), ('herdr', herdr_live_handles)):
+        if b in used:
+            got = ask(dry)
+            if got is None:
+                return None
+            out |= got
+    return out
+
+
+def lane_alive(lane, handles):
+    """Is the lane's terminal among the live handles (a herdr lane: its terminal id or its pane id)?"""
+    return bool(handles) and (lane.get('handle') in handles or (bool(lane.get('terminal'))
+                                                              and lane['terminal'] in handles))
+
+
 def session_lane(cfg, s, lanes):
     """The role of the lane in this project that session `s` runs, or None."""
     if s.get('lane'):
@@ -537,7 +722,7 @@ def orphans(cfg, lanes, sessions=None, handles=None):
         if lane.get('state') not in ('live', 'retiring'):
             out.append(s)
         elif s['handle'] and s['handle'] != lane.get('handle') and handles is not None \
-                and lane.get('handle') in handles:
+                and lane_alive(lane, handles):
             out.append(s)  # superseded: the live lane's own terminal is up
         elif not s['attached'] and handles is not None and s['handle'] and s['handle'] not in handles:
             detached.append(s)
@@ -640,13 +825,15 @@ def cmd_spawn(cfg, args):
     handle, how = open_terminal(cfg, role, repo, cmd, dry)
     if dry:
         return 0
-    if handle and how == 'orca':
+    if handle and how in ('orca', 'herdr'):
         bus(cfg, 'register', role, '--handle', handle, '--kind', 'claude', '--mode', 'file')
     elif bus_cli() and cfg.path('busDir').is_dir():
         bus(cfg, 'register', role, '--kind', 'claude', '--mode', 'file')
     gen = lanes.get(role, {}).get('generation', 0) + 1
     lanes[role] = {'role': role, 'brief': brief, 'repo': repo, 'backend': how, 'handle': handle, 'state': 'live',
                    'started': now(), 'generation': gen, 'model': model or cfg['workerModel']}
+    if how == 'herdr' and handle in HERDR_OPENED:
+        lanes[role].update({k: v for k, v in HERDR_OPENED[handle].items() if v})
     if coordinator:
         lanes[role]['kind'] = 'coordinator'
     save_lanes(cfg, lanes)
@@ -755,13 +942,14 @@ def cmd_lanes(cfg, args):
 
 
 def reconcile(cfg, lanes, sessions, handles):
-    """Mark closed every live orca lane whose terminal is gone and that no tmux session still runs; returns them."""
+    """Mark closed every live orca or herdr lane whose terminal is gone and that no tmux session still runs; returns
+    them."""
     if handles is None:
         return []
     gone = []
     for role, lane in lanes.items():
-        if (lane.get('state') in ('live', 'retiring') and lane.get('backend') == 'orca' and lane.get('handle')
-                and lane['handle'] not in handles and not lane_sessions(cfg, lane, sessions)):
+        if (lane.get('state') in ('live', 'retiring') and lane.get('backend') in ('orca', 'herdr')
+                and lane.get('handle') and not lane_alive(lane, handles) and not lane_sessions(cfg, lane, sessions)):
             lane['state'] = 'closed'
             lane['retired'] = now()
             gone.append(role)
@@ -773,7 +961,7 @@ def reconcile(cfg, lanes, sessions, handles):
 def cmd_status(cfg, args):
     lanes = load_lanes(cfg)
     sessions = tmux_sessions()
-    handles = orca_live_handles() if any(l.get('backend') == 'orca' for l in lanes.values()) else None
+    handles = live_handles(lanes)
     gone = reconcile(cfg, lanes, sessions, handles)
     live = [r for r, l in lanes.items() if l.get('state') in ('live', 'retiring')]
     workers = [r for r in live if not is_coordinator(r, lanes[r])]
@@ -840,7 +1028,7 @@ def cmd_reap(cfg, args):
         for role in pos:
             found += lane_sessions(cfg, lanes.get(role) or {'role': role}, sessions)
     else:
-        handles = orca_live_handles() if any(l.get('backend') == 'orca' for l in lanes.values()) else None
+        handles = live_handles(lanes)
         mine = own_pids()
         found = [o for o in orphans(cfg, lanes, sessions, handles)[0] if not mine & set(o['pids'])]
     if not found:
@@ -1107,7 +1295,7 @@ def write_usage(cfg, reading, source):
 def record_probe(cfg, reading):
     """Store a probe's reading. A probe that read no numbers is logged but never replaces the last good reading,
     so it can neither hide a real one nor be reused as if it were fresh."""
-    source = 'probe:' + cfg['backend']
+    source = 'probe:' + cfg.backend
     if reading.get('week') is None and reading.get('session') is None:
         p = cfg.path('reportsDir') / 'usage_history.log'
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -1140,13 +1328,36 @@ def probe_interval_min(cfg, week):
 
 
 def probe_usage(cfg, dry=False):
-    """Read /usage from a throwaway Claude Code session in a terminal the backend can read back (orca, tmux).
+    """Read /usage from a throwaway Claude Code session in a terminal the backend can read back (orca, herdr, tmux).
 
     The session runs `probeCommand` (a cheap model), gets `/usage` typed, has its screen read, and is closed.
     No task work happens in it. Returns {'session','week'} or raises SystemExit when the backend cannot read a screen.
     """
-    b = cfg['backend']
+    b = cfg.backend
     repo = cfg.repos()[0]
+    if b == 'herdr':
+        ws = herdr_workspace(repo, dry)
+        if dry:
+            herdr_open_tab(ws, repo, 'usage-probe', dry=True)
+            run(['herdr', 'pane', 'run', '<pane>', cfg['probeCommand']], dry)
+            return {'session': None, 'week': None}
+        pane = {}
+        before = herdr_tabs_labelled(ws, 'usage-probe')
+        try:
+            pane = herdr_open_tab(ws, repo, 'usage-probe')
+            h = pane['pane_id']
+            run(['herdr', 'pane', 'run', h, cfg['probeCommand']])
+            time.sleep(PROBE_START_S)
+            run(['herdr', 'pane', 'run', h, '/usage'])
+            screen = wait_for_usage(lambda: herdr_screen(h))
+            run(['herdr', 'pane', 'send-keys', h, 'esc'])
+            run(['herdr', 'pane', 'run', h, '/exit'])
+            time.sleep(2)
+        finally:  # whatever failed, the probe tab never outlives the probe
+            closed = bool(pane.get('tab_id')) and run(['herdr', 'tab', 'close', pane['tab_id']]).returncode == 0
+            if not closed:
+                herdr_close_by_label(ws, 'usage-probe', before)
+        return parse_usage(screen)
     if b == 'orca':
         if dry:
             run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', 'usage-probe', '--json'], dry)
@@ -1239,7 +1450,7 @@ def cmd_usage(cfg, args):
         return 0
     if not rec:
         print('no usage reading yet: the plugin records the coordinator session\'s readings; `usage --probe` reads '
-              '/usage through the backend (orca, tmux)')
+              '/usage through the backend (orca, herdr, tmux)')
         return 1
     age = int((time.time() - rec.get('time', 0)) / 60)
     print(f"week {rec.get('week')}% (pause at {cfg['pauseWeeklyPercent']}%), session {rec.get('session')}% "
@@ -1327,10 +1538,14 @@ def tell(cfg, role, text, prio='urgent'):
 
 
 def interrupt(cfg, lane, dry=False):
-    """Stop a lane that did not answer: an Escape to the agent first (orca, tmux), then close its terminal."""
+    """Stop a lane that did not answer: an Escape to the agent first (orca, herdr, tmux), then close its terminal."""
     h, how = lane.get('handle'), lane.get('backend')
     if how == 'orca' and h:
         run(['orca', 'terminal', 'send', '--terminal', h, '--text', '\x1b'], dry)
+    elif how == 'herdr' and h:
+        pane = {'pane_id': lane.get('handle')} if dry else herdr_locate(lane)
+        if pane:
+            run(['herdr', 'pane', 'send-keys', pane['pane_id'], 'esc'], dry)
     elif how == 'tmux' and h:
         run(['tmux', 'send-keys', '-t', h, 'Escape'], dry)
     return close_terminal(cfg, lane, dry)

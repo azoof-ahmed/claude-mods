@@ -28,7 +28,7 @@ You coordinate; workers do the work. Your context is the scarcest thing in the s
    | `lanes.json` | Which lanes exist and where they run |
 
 2. Edit section 1 of the rules core with the user: what the project is, the priority order, and what is frozen. Keep the file under 100 lines.
-3. Choose the backend with the user if it is not set: `orca`, `tmux`, `wt` (Windows Terminal) or `manual`.
+3. Choose the backend with the user if it is not set: `orca`, `herdr`, `tmux`, `wt` (Windows Terminal), `manual`, or `auto` (whichever of herdr, Orca or tmux this session runs in).
 
 ## Plan, then brief
 - **Plan first.**

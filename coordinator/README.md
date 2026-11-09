@@ -65,7 +65,7 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `questions [--all]` | Lists open questions (or all of them). |
 | `answer <qid> "<a>"` | Records the answer and sends it to the asker on the bus. |
 | `preflight [--min-ram-gb N] [--min-battery P] [--max-user-idle-s S]` | GO (exit 0) or WAIT (exit 1) for a heavy job, with the reasons. Works on Windows, Linux and macOS. |
-| `usage [--probe] [--json] [--debug]` | The latest usage reading (session and weekly %). `--probe` reads `/usage` now (orca, tmux). `--debug` saves every raw screen read to `<reportsDir>/usage-debug/`. |
+| `usage [--probe] [--json] [--debug]` | The latest usage reading (session and weekly %). `--probe` reads `/usage` now (orca, herdr, tmux). `--debug` saves every raw screen read to `<reportsDir>/usage-debug/`. |
 | `usage-watch [--start] [--once] [--probe] [--debug]` | Probes usage on the `probeIntervals` schedule and alerts the coordinator at the thresholds. A reading younger than the interval is reused (and says so); one without numbers never is, and a probe that reads no numbers never replaces a good reading. `--probe` forces a probe now. `--start` runs it in its own terminal. |
 | `pause [--tick] [--wait]` | The graceful pause: asks every live lane to checkpoint and stop. `--tick` advances it; `--wait` runs it to the end. The plugin ticks it every minute. |
 | `paused` | A worker reports that it has checkpointed (uses `AGENT_BUS_ROLE`, or `--role`). |
@@ -78,12 +78,16 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | --- | --- | --- |
 | `manual` (default) | Prints the command, with `AGENT_BUS_ROLE` set, for you to run in a new terminal. | You close it. |
 | `orca` | `orca terminal create --worktree path:<repo> --title <role>`, then the worker command is typed into it. The handle is registered on the bus. | `orca terminal close --tab` |
+| `herdr` | A tab labelled `<role>` in the herdr workspace that already has a pane in `<repo>` (else a new, unfocused workspace named after the repo): `herdr tab create --env AGENT_BUS_ROLE=<role> --env COORD_LANE=...`, then `herdr pane run`. The lane keeps the pane id (registered on the bus), the tab id and the terminal id. | `herdr tab close` |
 | `tmux` | `tmux new-window -n <role> -c <repo> -e AGENT_BUS_ROLE=<role>`, in the current session or a detached `coord` session. | `tmux kill-window` |
 | `wt` | A new Windows Terminal tab (`wt -w 0 nt --title <role> -d <repo>`). | You close it. |
+| `auto` | `herdr` inside a herdr pane (`HERDR_ENV=1`), `orca` inside an Orca terminal (`ORCA_TERMINAL_HANDLE`), `tmux` inside tmux, else `manual`. The setting stays `auto` in the project file and is resolved by each session, so one project can be run from Orca one day and from herdr the next. | As above |
 
-**Wrappers that run the agent in their own tmux session** (claude-auto-retry, for one) only attach the terminal to that session, so closing the terminal leaves the agent running, detached, beside its successor. Every close (`retire --close`, `respawn`, `close-idle`, a pause interrupt) therefore also kills the tmux sessions whose environment names the lane: `ORCA_TERMINAL_HANDLE` = its handle, or `COORD_LANE` = `<project root>#<role>` (spawn exports it; a session from an older worker without it matches on `AGENT_BUS_ROLE`). Sessions are targeted by id, and their processes are waited for, then sent SIGTERM and SIGKILL, only while each pid's start time is unchanged. The caller's own session is never touched.
+**herdr pane ids** (`w1:p3`) are stable while the herdr server runs but can be renumbered when it restarts. A herdr lane is therefore found by its terminal id first; its pane id counts only while that pane's tab still carries the lane's name. Every lane records its own backend, so lanes started under orca keep closing through orca after a project switches to herdr or `auto`.
 
-`status` lists two kinds of leftover session. An **orphan** provably should not run: its lane is closed or paused, or the lane's live terminal is another one (a successor). A bare `reap` kills orphans. A **detached** lane is live but its terminal is gone (an Orca restart, a tab closed by mistake): its agent may still be working, so it is only listed, with the `tmux attach` command to get it back; `reap <role>` stops it. Coordinator lanes (role `coordinator`, or spawned with `--coordinator`) are skipped by `pause`, `close-idle` and a bare `reap`; only `retire`, `respawn` or `reap <role>` touch them.
+**Wrappers that run the agent in their own tmux session** (claude-auto-retry, for one) only attach the terminal to that session, so closing the terminal leaves the agent running, detached, beside its successor. Every close (`retire --close`, `respawn`, `close-idle`, a pause interrupt) therefore also kills the tmux sessions whose environment names the lane: `ORCA_TERMINAL_HANDLE` = its handle, or `COORD_LANE` = `<project root>#<role>` (spawn exports it; a session from an older worker without it matches on `AGENT_BUS_ROLE`). Inside herdr the session's `HERDR_PANE_ID` is recorded as its handle for `status`, but never matches a lane on its own: a pane id can be reused after a herdr restart, and herdr lanes always carry `COORD_LANE`. Sessions are targeted by id, and their processes are waited for, then sent SIGTERM and SIGKILL, only while each pid's start time is unchanged. The caller's own session is never touched.
+
+`status` lists two kinds of leftover session. An **orphan** provably should not run: its lane is closed or paused, or the lane's live terminal is another one (a successor). A bare `reap` kills orphans. A **detached** lane is live but its terminal is gone (an Orca or herdr restart, a tab closed by mistake): its agent may still be working, so it is only listed, with the `tmux attach` command to get it back; `reap <role>` stops it. Coordinator lanes (role `coordinator`, or spawned with `--coordinator`) are skipped by `pause`, `close-idle` and a bare `reap`; only `retire`, `respawn` or `reap <role>` touch them.
 
 The worker command comes from two templates:
 
@@ -99,7 +103,7 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
 | Option | Default | What it does |
 | --- | --- | --- |
 | `repos` | `.` | Comma-separated repo paths workers start in. The first is the default. |
-| `backend` | `manual` | `manual`, `orca`, `tmux` or `wt` (see Backends). |
+| `backend` | `manual` | `manual`, `auto`, `orca`, `herdr`, `tmux` or `wt` (see Backends). |
 | `shell` | `auto` | How `AGENT_BUS_ROLE` is set before the command: `auto` (PowerShell on Windows, POSIX elsewhere), `posix`, `powershell` or `cmd`. |
 | `workerCommand` | `claude --model {model} "{prompt}"` | The worker command template. |
 | `workerPrompt` | `Read {brief} and execute it. Your role is {role}.` | The worker's first prompt. |
@@ -146,7 +150,7 @@ The goal is to stop at about 80% of the weekly limit without losing work. Going 
   - It reuses a fresh reading when there is one.
   - Otherwise it opens a throwaway session (`probeCommand`, a cheap model), types `/usage`, reads the screen and closes it.
   - It probes every 60 minutes, every 20 minutes from 70% and every 10 minutes from 78% (`probeIntervals`).
-  - Screen reading needs the `orca` or `tmux` backend. With `wt` or `manual`, only the coordinator session's own readings are available.
+  - Screen reading needs the `orca`, `herdr` or `tmux` backend. With `wt` or `manual`, only the coordinator session's own readings are available.
 - **At the threshold**, the watcher sends the coordinator an urgent bus message, once per crossing. Without agent-bus it appends to `<reportsDir>/alerts.jsonl` and prints. In the coordinator session the plugin adds a note and a toast.
 
 **`/coordinator pause`:**

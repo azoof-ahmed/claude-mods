@@ -13,8 +13,12 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import coord  # noqa: E402
 
+REAL_HERDR_PANES = coord.herdr_panes
+
 CLEAN = {coord.env_key(k): '' for k in coord.DEFAULTS}
-CLEAN.update({'AGENT_BUS_ROLE': '', 'AGENT_BUS_CLI': os.devnull + '-missing'})
+CLEAN.update({'AGENT_BUS_ROLE': '', 'AGENT_BUS_CLI': os.devnull + '-missing',
+              # the tests run inside Orca, herdr or tmux: none of that may leak into `auto`
+              'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
 
 
 class CoordTest(unittest.TestCase):
@@ -35,8 +39,11 @@ class CoordTest(unittest.TestCase):
         self.notmux.start()
         self.noorca = mock.patch.object(coord, 'orca_live_handles', lambda dry=False: None)
         self.noorca.start()
+        self.noherdr = mock.patch.object(coord, 'herdr_panes', lambda dry=False: None)
+        self.noherdr.start()
 
     def tearDown(self):
+        self.noherdr.stop()
         self.noorca.stop()
         self.notmux.stop()
         self.nobus.stop()
@@ -608,6 +615,195 @@ class CoordTest(unittest.TestCase):
         self.assertNotIn('s-coord', self.killed(calls))
         _, out = self.run_cli('status')
         self.assertIn('live of max', out)
+
+    # ---- herdr and auto
+
+    def test_auto_backend_follows_the_terminal_the_session_runs_in(self):
+        d = coord.detect_backend
+        self.assertEqual(d({'HERDR_ENV': '1', 'HERDR_PANE_ID': 'w1:p1', 'TMUX': '/tmp/t', 'ORCA_TERMINAL_HANDLE': 'x'}),
+                         'herdr')
+        self.assertEqual(d({'ORCA_TERMINAL_HANDLE': 'term_a', 'TMUX': '/tmp/t'}), 'orca')
+        self.assertEqual(d({'TMUX': '/tmp/t'}), 'tmux')
+        self.assertEqual(d({'HERDR_ENV': '1'}), 'manual')  # no pane: nothing to open a tab beside
+        self.assertEqual(d({}), 'manual')
+        self.run_cli('init', '--backend', 'auto')
+        cfg = coord.Config(self.root)
+        self.assertEqual(cfg['backend'], 'auto')  # saved as auto, resolved per session
+        with mock.patch.dict(os.environ, {'HERDR_ENV': '1', 'HERDR_PANE_ID': 'w1:p1'}):
+            self.assertEqual(cfg.backend, 'herdr')
+        self.assertEqual(cfg.backend, 'manual')
+        code, out = self.run_cli('lanes', '--backend', 'kitty')
+        self.assertNotEqual(code, 0)
+        self.assertIn('auto, orca, herdr, tmux, wt or manual', out)
+
+    def fake_herdr(self, calls, panes, labels=None, create_ok=True):
+        """A herdr server: `panes` is its pane list (mutated by tab create/close), `labels` tab id -> label."""
+        labels = labels if labels is not None else {}
+        n = {'tab': 10}
+
+        def run(argv, dry=False, **kw):
+            calls.append(argv)
+            out, rc = '', 0
+            if argv[:3] == ['herdr', 'pane', 'list']:
+                out = json.dumps({'result': {'type': 'pane_list', 'panes': panes}})
+            elif argv[:3] == ['herdr', 'workspace', 'create']:
+                out = json.dumps({'result': {'workspace': {'workspace_id': 'w9'}, 'tab': {'tab_id': 'w9:t1'},
+                                             'root_pane': {'pane_id': 'w9:p1', 'tab_id': 'w9:t1'}}})
+            elif argv[:3] == ['herdr', 'tab', 'create']:
+                ws = argv[argv.index('--workspace') + 1]
+                n['tab'] += 1
+                tab, pane = f'{ws}:t{n["tab"]}', f'{ws}:p{n["tab"]}'
+                labels[tab] = argv[argv.index('--label') + 1]
+                p = {'pane_id': pane, 'tab_id': tab, 'workspace_id': ws, 'terminal_id': f'term_{n["tab"]}',
+                     'cwd': argv[argv.index('--cwd') + 1]}
+                panes.append(p)
+                out = json.dumps({'result': {'type': 'tab_created', 'tab': {'tab_id': tab},
+                                             'root_pane': p if create_ok else {}}})
+            elif argv[:3] == ['herdr', 'tab', 'close']:
+                panes[:] = [p for p in panes if p['tab_id'] != argv[3]]
+                labels.pop(argv[3], None)
+            elif argv[:3] == ['herdr', 'tab', 'get']:
+                out = json.dumps({'result': {'tab': {'tab_id': argv[3], 'label': labels.get(argv[3])}}})
+            elif argv[:3] == ['herdr', 'tab', 'list']:
+                ws = argv[argv.index('--workspace') + 1]
+                out = json.dumps({'result': {'tabs': [{'tab_id': t, 'label': l} for t, l in labels.items()
+                                                      if t.startswith(ws + ':')]}})
+            elif argv[:3] == ['herdr', 'pane', 'read']:
+                out = 'Current session  12% used\nCurrent week (all models)  34% used\n'
+            return coord.subprocess.CompletedProcess(argv, rc, out, '')
+        return run
+
+    def herdr_on(self, run):
+        """Patches that put the fake herdr server in place of the real one (setUp blocks herdr_panes)."""
+        return (mock.patch.multiple(coord, run=run, herdr_panes=REAL_HERDR_PANES),
+                mock.patch.object(coord.shutil, 'which', lambda n: '/bin/' + n))
+
+    def test_herdr_spawn_opens_a_tab_in_the_repo_workspace_with_the_lane_env(self):
+        self.run_cli('init', '--backend', 'herdr')
+        repo = str(self.root)
+        panes = [{'pane_id': 'w2:p1', 'tab_id': 'w2:t1', 'workspace_id': 'w2', 'terminal_id': 'term_x',
+                  'cwd': '/elsewhere'},
+                 {'pane_id': 'w3:p1', 'tab_id': 'w3:t1', 'workspace_id': 'w3', 'terminal_id': 'term_y', 'cwd': repo}]
+        calls = []
+        p1, p2 = self.herdr_on(self.fake_herdr(calls, panes))
+        with p1, p2:
+            code, out = self.run_cli('spawn', 'w1')
+        self.assertEqual(code, 0, out)
+        create = next(c for c in calls if c[:3] == ['herdr', 'tab', 'create'])
+        self.assertEqual(create[create.index('--workspace') + 1], 'w3')
+        self.assertIn('AGENT_BUS_ROLE=w1', create)
+        self.assertIn('COORD_LANE=' + coord.lane_key(coord.Config(self.root), 'w1'), create)
+        self.assertIn('--no-focus', create)
+        runc = next(c for c in calls if c[:3] == ['herdr', 'pane', 'run'])
+        self.assertEqual(runc[3], 'w3:p11')
+        self.assertTrue(runc[4].startswith('claude --model opus'))  # no env prefix typed: the tab env carries it
+        self.assertFalse(any(c[:3] == ['herdr', 'workspace', 'create'] for c in calls))
+        lane = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())['w1']
+        self.assertEqual((lane['backend'], lane['handle'], lane['tab'], lane['terminal']),
+                         ('herdr', 'w3:p11', 'w3:t11', 'term_11'))
+
+    def test_herdr_spawn_makes_a_workspace_when_none_runs_in_the_repo(self):
+        self.run_cli('init', '--backend', 'herdr')
+        calls = []
+        p1, p2 = self.herdr_on(self.fake_herdr(calls, []))
+        with p1, p2:
+            code, out = self.run_cli('spawn', 'w1')
+        self.assertEqual(code, 0, out)
+        ws = next(c for c in calls if c[:3] == ['herdr', 'workspace', 'create'])
+        self.assertEqual(ws[ws.index('--label') + 1], self.root.name)
+        self.assertIn('--no-focus', ws)
+        create = next(c for c in calls if c[:3] == ['herdr', 'tab', 'create'])
+        self.assertEqual(create[create.index('--workspace') + 1], 'w9')
+
+    def test_herdr_unreadable_create_closes_the_tab_by_label(self):
+        self.run_cli('init', '--backend', 'herdr')
+        calls, labels = [], {'w3:t1': 'w1'}  # an older tab with the same label is left alone
+        panes = [{'pane_id': 'w3:p1', 'tab_id': 'w3:t1', 'workspace_id': 'w3', 'terminal_id': 't', 'cwd': str(self.root)}]
+        p1, p2 = self.herdr_on(self.fake_herdr(calls, panes, labels, create_ok=False))
+        with p1, p2:
+            code, out = self.run_cli('spawn', 'w1')
+        self.assertNotEqual(code, 0)
+        self.assertEqual([c for c in calls if c[:3] == ['herdr', 'tab', 'close']], [['herdr', 'tab', 'close', 'w3:t11']])
+
+    def test_herdr_close_finds_the_lane_by_terminal_id_and_never_a_reused_pane_id(self):
+        self.run_cli('init', '--backend', 'herdr')
+        cfg = coord.Config(self.root)
+        # herdr restarted: the lane's terminal is now pane w5:p2 in tab w5:t2
+        panes = [{'pane_id': 'w5:p2', 'tab_id': 'w5:t2', 'workspace_id': 'w5', 'terminal_id': 'term_a'}]
+        calls = []
+        p1, p2 = self.herdr_on(self.fake_herdr(calls, panes, {'w5:t2': 'w1'}))
+        with p1, p2, redirect_stdout(io.StringIO()):
+            ok = coord.close_terminal(cfg, {'role': 'w1', 'backend': 'herdr', 'handle': 'w1:p3', 'tab': 'w1:t3',
+                                            'terminal': 'term_a'})
+        self.assertTrue(ok)
+        self.assertEqual([c for c in calls if c[:3] == ['herdr', 'tab', 'close']], [['herdr', 'tab', 'close', 'w5:t2']])
+        # the lane's pane id now names another tab: nothing is closed
+        panes = [{'pane_id': 'w1:p3', 'tab_id': 'w1:t3', 'workspace_id': 'w1', 'terminal_id': 'term_other'}]
+        calls = []
+        p1, p2 = self.herdr_on(self.fake_herdr(calls, panes, {'w1:t3': 'someone-else'}))
+        with p1, p2, redirect_stdout(io.StringIO()):
+            self.assertTrue(coord.close_terminal(cfg, {'role': 'w1', 'backend': 'herdr', 'handle': 'w1:p3',
+                                                       'terminal': 'term_a'}))
+        self.assertFalse(any(c[:3] == ['herdr', 'tab', 'close'] for c in calls))
+
+    def test_herdr_status_reconciles_by_terminal_id(self):
+        self.run_cli('init', '--backend', 'herdr')
+        lanes = {'gone': {'role': 'gone', 'backend': 'herdr', 'handle': 'w1:p2', 'terminal': 'term_g', 'state': 'live'},
+                 'moved': {'role': 'moved', 'backend': 'herdr', 'handle': 'w1:p3', 'terminal': 'term_m',
+                           'state': 'live'}}
+        (self.root / '.claude/coord/lanes/lanes.json').write_text(json.dumps(lanes))
+        panes = [{'pane_id': 'w4:p1', 'tab_id': 'w4:t1', 'workspace_id': 'w4', 'terminal_id': 'term_m'}]
+        p1, p2 = self.herdr_on(self.fake_herdr([], panes))
+        with p1, p2:
+            _, out = self.run_cli('status')
+        self.assertIn('marked closed: gone', out)
+        saved = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())
+        self.assertEqual((saved['gone']['state'], saved['moved']['state']), ('closed', 'live'))
+
+    def test_herdr_probe_reads_the_screen_and_closes_its_tab(self):
+        self.run_cli('init', '--backend', 'herdr')
+        cfg = coord.Config(self.root)
+        calls = []
+        p1, p2 = self.herdr_on(self.fake_herdr(calls, []))
+        with p1, p2, mock.patch.object(coord.time, 'sleep', lambda s: None):
+            self.assertEqual(coord.probe_usage(cfg), {'session': 12, 'week': 34})
+        self.assertIn(['herdr', 'pane', 'run', 'w9:p11', 'claude --model haiku'], calls)
+        self.assertIn(['herdr', 'pane', 'read', 'w9:p11', '--source', 'visible'], calls)
+        self.assertIn(['herdr', 'tab', 'close', 'w9:t11'], calls)
+
+    def test_herdr_interrupt_sends_escape_then_closes(self):
+        self.run_cli('init', '--backend', 'herdr')
+        cfg = coord.Config(self.root)
+        panes = [{'pane_id': 'w1:p3', 'tab_id': 'w1:t3', 'workspace_id': 'w1', 'terminal_id': 'term_a'}]
+        calls = []
+        p1, p2 = self.herdr_on(self.fake_herdr(calls, panes))
+        with p1, p2, redirect_stdout(io.StringIO()):
+            coord.interrupt(cfg, {'role': 'w1', 'backend': 'herdr', 'handle': 'w1:p3', 'terminal': 'term_a'})
+        self.assertIn(['herdr', 'pane', 'send-keys', 'w1:p3', 'esc'], calls)
+        self.assertIn(['herdr', 'tab', 'close', 'w1:t3'], calls)
+
+    def test_tmux_session_inside_herdr_carries_the_pane_id_but_never_matches_by_it_alone(self):
+        outs = {
+            ('tmux', 'list-sessions'): '$1\tclaude-retry-1-2\t0\n',
+            ('tmux', 'show-environment', '$1'): 'AGENT_BUS_ROLE=w1\nHERDR_ENV=1\nHERDR_PANE_ID=w1:p3\n',
+            ('tmux', 'list-panes', '$1'): '100\n',
+            ('ps', 'pid=,ppid=,lstart='): '  100     1 Sat Oct 24 22:44:23 2026\n',
+        }
+
+        def run(argv, dry=False, **kw):
+            key = tuple(a for a in argv if not a.startswith('-') and '#{' not in a)
+            return coord.subprocess.CompletedProcess(argv, 0, outs.get(key, ''), '')
+        self.notmux.stop()
+        try:
+            with mock.patch.object(coord, 'run', run), mock.patch.object(coord.shutil, 'which', lambda n: '/bin/' + n):
+                got = coord.tmux_sessions()
+        finally:
+            self.notmux.start()
+        self.assertEqual((got[0]['handle'], got[0]['herdr']), ('w1:p3', True))
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        other = dict(got[0], role='w2')  # another lane's session that happens to carry the same (reused) pane id
+        self.assertEqual(coord.lane_sessions(cfg, {'role': 'w1', 'handle': 'w1:p3'}, [other]), [])
 
 
 class BusCliTest(unittest.TestCase):

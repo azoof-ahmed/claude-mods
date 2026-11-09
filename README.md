@@ -4,8 +4,8 @@ General-purpose Claude Code mods (plugins). Each one works in any repository and
 
 | Mod | What it does |
 | --- | --- |
-| [`coordinator`](coordinator) | Runs many worker agents from one coordinator session. `/coordinator init` scaffolds a rules core, lane cards, briefs, a resume brief, a scheduler-worker brief, a handoff protocol and a question queue. It spawns, retires and respawns workers in Orca, tmux, Windows Terminal or by hand, and produces status reports. Workers are reminded to retire at a token threshold and to pause near usage limits. |
-| [`agent-bus`](agent-bus) | A message bus between agent sessions. Mail reaches a busy agent between tool calls and wakes an idle one through a Monitor. Urgent mail can be typed into Orca terminals. Includes a localhost web chat and a vim-style terminal client (`/bus chat`, `/bus tui`). |
+| [`coordinator`](coordinator) | Runs many worker agents from one coordinator session. `/coordinator init` scaffolds a rules core, lane cards, briefs, a resume brief, a scheduler-worker brief, a handoff protocol and a question queue. It spawns, retires and respawns workers in Orca, herdr, tmux, Windows Terminal or by hand, and produces status reports. Workers are reminded to retire at a token threshold and to pause near usage limits. |
+| [`agent-bus`](agent-bus) | A message bus between agent sessions. Mail reaches a busy agent between tool calls and wakes an idle one through a Monitor. Urgent mail can be typed into Orca or herdr terminals. Includes a localhost web chat and a vim-style terminal client (`/bus chat`, `/bus tui`). |
 | [`task-tracker`](task-tracker) | A SQLite task tracker with a `task` CLI, role permissions and conflict detection by `touches` globs. In Claude Code it adds a `/tasks` board, a status line and toasts. It also has an optional Textual board. |
 | [`code-index`](code-index) | Cheap reading for agents: a compact code index, markdown TOCs with line numbers, and `STATUS(<task>)` comment tags. |
 | [`guardrails`](guardrails) | A lint gate on Claude's edits with a baseline ratchet. The project supplies the rules; only new violations block. |
