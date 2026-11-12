@@ -71,17 +71,51 @@ PATHS = ('busDir', 'trackerDb', 'rulesFile', 'briefsDir', 'cardsDir', 'reportsDi
 BACKENDS = ('auto', 'orca', 'herdr', 'tmux', 'wt', 'manual')
 
 
-def detect_backend(env=None):
-    """`auto`: herdr inside a herdr pane (HERDR_ENV=1), orca inside an Orca terminal, tmux inside tmux, else manual.
-    herdr is checked first: a herdr pane that runs the agent inside tmux (claude-auto-retry) still has HERDR_ENV."""
+def orca_runtime_path():
+    """Where the Orca app writes its runtime metadata while it runs (macOS); None where unknown."""
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support' / 'orca' / 'orca-runtime.json'
+    return None
+
+
+def orca_app_up():
+    """Whether the Orca app runs. An Orca terminal outlives the app (its terminal host daemon keeps it), and then
+    every `orca terminal create` fails with runtime_unavailable. Unknown platforms count as up."""
+    p = orca_runtime_path()
+    return p is None or p.exists()
+
+
+def orca_unavailable(r):
+    """`orca` refused because its app isn't running (runtime_unavailable, no orca-runtime.json)."""
+    text = f'{r.stdout or ""}\n{r.stderr or ""}'
+    return 'runtime_unavailable' in text or 'orca-runtime.json' in text or 'Start the Orca app' in text
+
+
+def tmux_or_manual(env=None):
+    """auto's fallback when the terminal it runs in can't open tabs: tmux when it is installed (a detached `coord`
+    session outside tmux), else manual."""
+    env = os.environ if env is None else env
+    return 'tmux' if env.get('TMUX') or shutil.which('tmux') else 'manual'
+
+
+def detect_backend(env=None, orca_up=None):
+    """`auto`: herdr inside a herdr pane (HERDR_ENV=1), orca inside an Orca terminal while the Orca app runs, tmux
+    inside tmux, else manual. herdr is checked first: a herdr pane that runs the agent inside tmux (claude-auto-retry)
+    still has HERDR_ENV. An Orca terminal whose app isn't running falls back to tmux (or manual without tmux)."""
     env = os.environ if env is None else env
     if env.get('HERDR_ENV') == '1' and env.get('HERDR_PANE_ID'):
         return 'herdr'
     if env.get('ORCA_TERMINAL_HANDLE'):
-        return 'orca'
+        if (orca_up or orca_app_up)():
+            return 'orca'
+        return tmux_or_manual(env)
     if env.get('TMUX'):
         return 'tmux'
     return 'manual'
+
+
+ORCA_DOWN = ('the Orca app isn\'t running (its terminal host keeps this terminal alive, but new tabs need the app: '
+             'no runtime metadata at {path})')
 
 
 # Child output is UTF-8 (orca, claude, the bus); the Windows locale codepage (cp1252) cannot decode it.
@@ -454,9 +488,11 @@ def herdr_screen(h, dry=False):
     return out
 
 
-def open_terminal(cfg, role, repo, cmd, dry=False):
+def open_terminal(cfg, role, repo, cmd, dry=False, backend=None):
     """Start `cmd` for `role` in a new terminal; returns (handle, how). The worker's env carries AGENT_BUS_ROLE."""
-    b = cfg.backend
+    b = backend or cfg.backend
+    if cfg['backend'] == 'auto' and backend is None and os.environ.get('ORCA_TERMINAL_HANDLE') and b in ('tmux', 'manual'):
+        print(f'coordinator: backend auto: {ORCA_DOWN.format(path=orca_runtime_path())}; using {b} instead.')
     if b == 'herdr':
         # a tab in the repo's workspace; its env carries the lane marker, so no prefix is typed before the command
         ws = herdr_workspace(repo, dry)
@@ -477,6 +513,14 @@ def open_terminal(cfg, role, repo, cmd, dry=False):
         r = run(['orca', 'terminal', 'create', '--worktree', f'path:{repo}', '--title', role, '--json'], dry)
         handle = orca_handle(r.stdout)
         if not handle and not dry:
+            if orca_unavailable(r):
+                down = ORCA_DOWN.format(path=orca_runtime_path() or 'orca-runtime.json')
+                if cfg['backend'] == 'auto':
+                    fb = tmux_or_manual()
+                    print(f'coordinator: backend auto: {down}; using {fb} instead.')
+                    return open_terminal(cfg, role, repo, cmd, dry, backend=fb)
+                raise SystemExit(f'coordinator: backend orca: {down}. Start the Orca app, or set "backend" to "tmux" '
+                                 f'(or "auto", which falls back to tmux) in .claude/claude-mods.json.')
             if r.returncode == 0:
                 orca_close_by_title(repo, role, before)  # the tab may exist: never leave an orphan
             raise SystemExit(f'coordinator: orca terminal create failed: {r.stderr.strip() or r.stdout.strip()}')
@@ -495,6 +539,8 @@ def open_terminal(cfg, role, repo, cmd, dry=False):
             target = ['-t', 'coord']
         r = run(['tmux', 'new-window', *target, '-P', '-F', '#{window_id}', '-n', role, '-c', repo,
                  '-e', f'AGENT_BUS_ROLE={role}', '-e', f'COORD_LANE={lane_key(cfg, role)}', cmd], dry)
+        if target and not dry:
+            print(f'coordinator: {role} runs in tmux session "coord" (window {role}): `tmux attach -t coord` to watch it.')
         return (r.stdout or '').strip() or None, 'tmux'
     if b == 'wt':
         if os.name == 'nt':
