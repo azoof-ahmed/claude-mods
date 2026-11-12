@@ -18,6 +18,39 @@ def done(out, code=0):
 
 
 class RecoverTest(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(h.shutil, 'which', lambda n: None)  # no hs, tmux or herdr on PATH unless a test says
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_hs_locate_comes_first(self):
+        env = {'ORCA_TERMINAL_HANDLE': 'term_old'}
+        hs = lambda e, c: ({'HERDR_ENV': '1', 'HERDR_PANE_ID': 'w1:p8', 'HERDR_SOCKET_PATH': '/b.sock'}, 'agent')  # noqa
+        got = h.recover(env, orca_up=lambda: False, hs=hs, tmux=lambda e: self.fail('asked tmux'))
+        self.assertEqual(got, 'hs:agent')
+        self.assertEqual((env['HERDR_PANE_ID'], env['HERDR_SOCKET_PATH']), ('w1:p8', '/b.sock'))
+        self.assertNotIn('ORCA_TERMINAL_HANDLE', env)
+
+    def test_hs_guess_does_not_override_a_running_orca(self):
+        hs = lambda e, c: ({'HERDR_ENV': '1', 'HERDR_SOCKET_PATH': '/a.sock'}, 'cwd')  # noqa: E731
+        env = {'ORCA_TERMINAL_HANDLE': 'term_a'}
+        self.assertIsNone(h.recover(env, orca_up=lambda: True, hs=hs))
+        self.assertEqual(env, {'ORCA_TERMINAL_HANDLE': 'term_a'})
+        tm = lambda e, c: ({'HERDR_ENV': '1', 'HERDR_PANE_ID': 'w1:p1'}, 'tmux')  # noqa: E731
+        self.assertEqual(h.recover(env, orca_up=lambda: True, hs=tm), 'hs:tmux')  # the pane is certain
+
+    def test_from_hs_reads_its_json(self):
+        out = '{"pane_id": "wE:p1", "session": "default", "socket_path": "/s.sock", "source": "tmux"}'
+        with mock.patch.object(h.shutil, 'which', lambda n: '/u/hs' if n == 'hs' else None), \
+                mock.patch.object(h, 'run', lambda argv, env=None, timeout=5: done(out)):
+            ctx, src = h.from_hs({}, '/repo')
+        self.assertEqual(src, 'tmux')
+        self.assertEqual(ctx, {'HERDR_ENV': '1', 'HERDR_PANE_ID': 'wE:p1', 'HERDR_SESSION': 'default',
+                               'HERDR_SOCKET_PATH': '/s.sock'})
+        with mock.patch.object(h.shutil, 'which', lambda n: '/u/hs'), \
+                mock.patch.object(h, 'run', lambda argv, env=None, timeout=5: done('{}', 1)):
+            self.assertEqual(h.from_hs({}, '/repo'), ({}, None))
+
     def test_a_pane_env_is_left_alone(self):
         env = {**PANE, 'ORCA_TERMINAL_HANDLE': 'term_a'}
         self.assertEqual(h.recover(env, tmux=lambda e: self.fail('asked tmux')), 'env')

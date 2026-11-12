@@ -3,7 +3,9 @@
 herdr gives every pane HERDR_ENV=1, HERDR_PANE_ID, HERDR_SOCKET_PATH and friends. A `claude` wrapper that runs the
 agent inside its own tmux session (claude-auto-retry) only attaches the herdr pane to that session, so the agent's
 environment is the tmux server's: often none of the HERDR_ variables, plus a leftover ORCA_TERMINAL_HANDLE when the
-server or the session was started in an Orca terminal. `recover` puts the herdr variables back, from:
+server or the session was started in an Orca terminal. `recover` puts the herdr variables back. It asks
+`hs locate --json` first (herdr-session-switcher, the user's herdr launcher; its stand-in for a core
+`herdr pane locate`), and does the same lookup itself when hs isn't installed:
 
 1. the tmux client attached to this session (it runs in the herdr pane, so it has them), or
 2. the running herdr sessions: the pane herdr reports for this Claude session id, else the one session with a pane
@@ -137,6 +139,26 @@ def from_sessions(env, cwd, sessions=None, panes=None):
     return {**ctx, **({'HERDR_WORKSPACE_ID': next(iter(ws))} if len(ws) == 1 and None not in ws else {})}
 
 
+HS_KEYS = {'pane_id': 'HERDR_PANE_ID', 'tab_id': 'HERDR_TAB_ID', 'workspace_id': 'HERDR_WORKSPACE_ID',
+           'session': 'HERDR_SESSION', 'socket_path': 'HERDR_SOCKET_PATH'}
+
+
+def from_hs(env, cwd):
+    """(variables, source) from `hs locate --json` (source: tmux, agent or cwd), or ({}, None) without hs or a hit."""
+    exe = shutil.which('hs')
+    if not exe:
+        return {}, None
+    r = run([exe, 'locate', '--json', '--cwd', cwd], env={**os.environ, **env})
+    try:
+        got = json.loads(r.stdout) if r and r.returncode == 0 else {}
+    except ValueError:
+        return {}, None
+    if not isinstance(got, dict) or not (got.get('pane_id') or got.get('socket_path')):
+        return {}, None
+    ctx = {'HERDR_ENV': '1', **{v: str(got[k]) for k, v in HS_KEYS.items() if got.get(k)}}
+    return ctx, got.get('source')
+
+
 def orca_running():
     """Whether the Orca app runs (macOS writes its runtime file); unknown platforms count as running."""
     if sys.platform != 'darwin':
@@ -144,20 +166,29 @@ def orca_running():
     return (Path.home() / 'Library' / 'Application Support' / 'orca' / 'orca-runtime.json').exists()
 
 
-def recover(env=None, cwd=None, orca_up=None, tmux=from_tmux, sessions=from_sessions):
+def recover(env=None, cwd=None, orca_up=None, tmux=from_tmux, sessions=from_sessions, hs=from_hs):
     """Put this session's herdr variables into `env` (os.environ) when they are missing; returns how they were found
-    ('env', 'tmux', 'session'), or None outside herdr. A recovered session drops ORCA_TERMINAL_HANDLE: it is left
-    over from the terminal the session started in. An Orca terminal whose app runs is left alone (Orca on a PC)."""
+    ('env', 'tmux', 'session', or 'hs:<its source>'), or None outside herdr. A recovered session drops
+    ORCA_TERMINAL_HANDLE: it is left over from the terminal the session started in. An Orca terminal whose app runs
+    is left alone (Orca on a PC) unless its tmux client is in a herdr pane."""
     env = os.environ if env is None else env
     if in_pane(env):
         return 'env'
     if env.get('HERDR_DISCOVER') == '0':
         return None
-    how, ctx = 'tmux', tmux(env)
-    if not ctx:
-        if env.get('ORCA_TERMINAL_HANDLE') and (orca_up or orca_running)():
+    cwd = cwd or os.getcwd()
+    orca_live = lambda: bool(env.get('ORCA_TERMINAL_HANDLE')) and (orca_up or orca_running)()  # noqa: E731
+    ctx, src = hs(env, cwd)
+    if ctx:
+        if src != 'tmux' and orca_live():
             return None
-        how, ctx = 'session', sessions(env, cwd or os.getcwd())
+        how = f'hs:{src}'
+    else:
+        how, ctx = 'tmux', tmux(env)
+    if not ctx:
+        if orca_live():
+            return None
+        how, ctx = 'session', sessions(env, cwd)
     if not ctx:
         return None
     for k in KEYS:
