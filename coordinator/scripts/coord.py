@@ -44,6 +44,7 @@ DEFAULTS = {
     'repos': '.',
     'backend': 'manual',              # auto | orca | herdr | tmux | wt | manual
     'shell': 'auto',                  # auto | posix | powershell | cmd: how the env prefix is written
+    'herdrWorkspace': 'reuse',        # reuse | new: where a herdr lane's tab opens (see herdr_workspace)
     'workerCommand': 'claude --model {model} "{prompt}"',
     'workerPrompt': 'Read {brief} and execute it. Your role is {role}.',
     'workerModel': 'opus',
@@ -64,6 +65,7 @@ DEFAULTS = {
     'minFreeRamGb': 4,
     'minBattery': 40,
 }
+HERDR_WORKSPACE_MODES = ('reuse', 'new')
 INTS = ('maxLanes', 'retireTokens', 'pauseSessionPercent', 'pauseWeeklyPercent', 'minBattery')
 FLOATS_EXTRA = ('pauseReminderMin', 'pauseGraceMin')
 FLOATS = ('minFreeRamGb',)
@@ -166,6 +168,8 @@ class Config(dict):
         if self['backend'] not in BACKENDS:
             raise SystemExit(f"coordinator: backend must be {', '.join(BACKENDS[:-1])} or manual, "
                              f"not {self['backend']!r}")
+        if self['herdrWorkspace'] not in HERDR_WORKSPACE_MODES:
+            raise SystemExit(f"coordinator: herdrWorkspace must be reuse or new, not {self['herdrWorkspace']!r}")
 
     @property
     def backend(self):
@@ -406,12 +410,55 @@ def same_path(a, b):
         return a == b
 
 
-def herdr_workspace(repo, dry=False):
-    """The herdr workspace whose pane runs in `repo`, else a new one labelled after the repo (not focused)."""
+def repo_family(repo, dry=False):
+    """Every checkout of `repo`'s git repository: its main working tree and all its worktrees (realpaths). Empty when
+    `repo` isn't in a git repository or git can't be asked."""
+    if dry:
+        return []
+    r = run(['git', '-C', str(repo), 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+    common = (r.stdout or '').strip() if r.returncode == 0 else ''
+    if not common:
+        return []
+    r = run(['git', '--git-dir', common, 'worktree', 'list', '--porcelain'])
+    roots = [ln[len('worktree '):] for ln in (r.stdout or '').splitlines() if ln.startswith('worktree ')]
+    if not roots and Path(common).name == '.git':
+        roots = [str(Path(common).parent)]
+    return [os.path.realpath(x) for x in roots]
+
+
+def within(path, root):
+    """`path` is `root` or inside it (both resolved)."""
+    try:
+        a, b = os.path.realpath(path), os.path.realpath(root)
+        return os.path.commonpath([a, b]) == b
+    except (TypeError, ValueError, OSError):
+        return False
+
+
+def herdr_workspace(repo, dry=False, mode='reuse'):
+    """The herdr workspace a lane's tab opens in, so lanes open as tabs beside the work and never as new workspaces:
+
+    1. a workspace with a pane in `repo` itself;
+    2. (reuse) a workspace with a pane in any checkout of the same git repository (its main working tree or any of
+       its worktrees, or a folder inside one): the coordinator's own workspace when it is one of them;
+    3. (reuse) the coordinator's own workspace ($HERDR_WORKSPACE_ID of the spawning session, while it is live);
+    4. else a new, unfocused workspace labelled after the repo. `mode` new (herdrWorkspace, --herdr-workspace)
+       skips 2 and 3: a workspace per repo path, as before 0.2.11.
+    """
+    panes = herdr_panes(dry) or []
     for key in ('cwd', 'foreground_cwd'):
-        for p in herdr_panes(dry) or []:
+        for p in panes:
             if p.get(key) and p.get('workspace_id') and same_path(p[key], repo):
                 return p['workspace_id']
+    own = os.environ.get('HERDR_WORKSPACE_ID') if os.environ.get('HERDR_ENV') == '1' else None
+    if mode != 'new':
+        family = repo_family(repo, dry)
+        hits = [p['workspace_id'] for p in panes if p.get('workspace_id') and family and any(
+            p.get(k) and any(within(p[k], root) for root in family) for k in ('cwd', 'foreground_cwd'))]
+        if hits:
+            return own if own in hits else hits[0]
+        if own and (dry or any(p.get('workspace_id') == own for p in panes)):
+            return own
     r, res = herdr_json(['workspace', 'create', '--cwd', repo, '--label', Path(repo).name or repo, '--no-focus'], dry)
     ws = (res.get('workspace') or {}).get('workspace_id')
     if not ws and not dry:
@@ -495,7 +542,7 @@ def open_terminal(cfg, role, repo, cmd, dry=False, backend=None):
         print(f'coordinator: backend auto: {ORCA_DOWN.format(path=orca_runtime_path())}; using {b} instead.')
     if b == 'herdr':
         # a tab in the repo's workspace; its env carries the lane marker, so no prefix is typed before the command
-        ws = herdr_workspace(repo, dry)
+        ws = herdr_workspace(repo, dry, cfg['herdrWorkspace'])
         pane = herdr_open_tab(ws, repo, role, [f'AGENT_BUS_ROLE={role}', f'COORD_LANE={lane_key(cfg, role)}'], dry)
         handle = pane.get('pane_id')
         s = run(['herdr', 'pane', 'run', handle or '<pane>', cmd], dry)
@@ -1382,7 +1429,7 @@ def probe_usage(cfg, dry=False):
     b = cfg.backend
     repo = cfg.repos()[0]
     if b == 'herdr':
-        ws = herdr_workspace(repo, dry)
+        ws = herdr_workspace(repo, dry, cfg['herdrWorkspace'])
         if dry:
             herdr_open_tab(ws, repo, 'usage-probe', dry=True)
             run(['herdr', 'pane', 'run', '<pane>', cfg['probeCommand']], dry)
@@ -1758,7 +1805,7 @@ def main(argv=None):
         print(__doc__)
         return 0
     flags = {}
-    for k in ('backend', 'repos', 'workerModel', 'maxLanes'):
+    for k in ('backend', 'repos', 'workerModel', 'maxLanes', 'herdrWorkspace'):
         v = take(args, '--' + re.sub(r'(?<!^)(?=[A-Z])', '-', k).lower())
         if v:
             flags[k] = v
