@@ -1,6 +1,6 @@
 {
   "name": "coordinator",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, herdr, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports, token-economy reminders, and a usage watcher with a graceful pause and resume.",
   "author": {
     "name": "Azoof Ahmed"
@@ -25,6 +25,16 @@
         "herdr",
         "tmux",
         "wt"
+      ]
+    },
+    "herdrWorkspace": {
+      "type": "string",
+      "title": "herdr lane workspace",
+      "description": "Where a herdr lane's tab opens. reuse: the workspace with a pane in the lane's repo, else one with a pane in any checkout (worktree) of the same git repo, else the coordinator's own workspace; a new workspace only when none of these exists. new: a workspace per repo path unless a pane is in that exact path.",
+      "default": "reuse",
+      "options": [
+        "reuse",
+        "new"
       ]
     },
     "shell": {

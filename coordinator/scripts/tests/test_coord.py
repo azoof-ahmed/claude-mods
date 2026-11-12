@@ -18,7 +18,7 @@ REAL_HERDR_PANES = coord.herdr_panes
 CLEAN = {coord.env_key(k): '' for k in coord.DEFAULTS}
 CLEAN.update({'AGENT_BUS_ROLE': '', 'AGENT_BUS_CLI': os.devnull + '-missing',
               # the tests run inside Orca, herdr or tmux: none of that may leak into `auto`
-              'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
+              'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'HERDR_WORKSPACE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
 
 
 class CoordTest(unittest.TestCase):
@@ -786,6 +786,101 @@ class CoordTest(unittest.TestCase):
         self.assertIn('--no-focus', ws)
         create = next(c for c in calls if c[:3] == ['herdr', 'tab', 'create'])
         self.assertEqual(create[create.index('--workspace') + 1], 'w9')
+
+    def git_repo_with_worktree(self):
+        """A real git repo at <tmp>/app with a worktree at <tmp>/wt-1541 (paths resolved)."""
+        import subprocess
+        main, wt = self.root / 'app', self.root / 'wt-1541'
+        (main / 'src').mkdir(parents=True)
+        g = lambda *a: subprocess.run(['git', *a], cwd=main, check=True, capture_output=True)  # noqa: E731
+        g('init', '-q')
+        g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
+        g('worktree', 'add', '-q', '-b', 'dev-1541', str(wt))
+        return os.path.realpath(main), os.path.realpath(wt)
+
+    def with_git(self, run):
+        """The fake herdr `run`, with git calls going to the real git."""
+        def both(argv, dry=False, **kw):
+            if argv[0] == 'git':
+                return coord.subprocess.run(argv, capture_output=True, **coord.TEXT)
+            return run(argv, dry, **kw)
+        return both
+
+    def spawned_in(self, calls):
+        create = next(c for c in calls if c[:3] == ['herdr', 'tab', 'create'])
+        return (create[create.index('--workspace') + 1], create[create.index('--cwd') + 1],
+                create[create.index('--label') + 1])
+
+    def test_herdr_lane_in_a_worktree_opens_beside_its_main_repo(self):
+        main, wt = self.git_repo_with_worktree()
+        self.run_cli('init', '--backend', 'herdr')
+        panes = [{'pane_id': 'w2:p1', 'tab_id': 'w2:t1', 'workspace_id': 'w2', 'cwd': '/elsewhere'},
+                 {'pane_id': 'w4:p1', 'tab_id': 'w4:t1', 'workspace_id': 'w4', 'cwd': os.path.join(main, 'src')}]
+        calls = []
+        p1, p2 = self.herdr_on(self.with_git(self.fake_herdr(calls, panes)))
+        with p1, p2:
+            code, out = self.run_cli('spawn', 'api-dev', '--repo', wt)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.spawned_in(calls), ('w4', wt, 'api-dev'))  # tab label = role, cwd = the --repo given
+        self.assertFalse(any(c[:3] == ['herdr', 'workspace', 'create'] for c in calls))
+
+    def test_herdr_lane_prefers_the_coordinators_workspace_among_the_repos(self):
+        main, wt = self.git_repo_with_worktree()
+        self.run_cli('init', '--backend', 'herdr')
+        panes = [{'pane_id': 'w4:p1', 'tab_id': 'w4:t1', 'workspace_id': 'w4', 'cwd': main},
+                 {'pane_id': 'w6:p1', 'tab_id': 'w6:t1', 'workspace_id': 'w6', 'foreground_cwd': wt + '/src'},
+                 {'pane_id': 'w6:p2', 'tab_id': 'w6:t2', 'workspace_id': 'w6', 'cwd': '/coord'}]
+        other_wt = os.path.realpath(self.root / 'wt-other')
+        import subprocess
+        subprocess.run(['git', 'worktree', 'add', '-q', '-b', 'other', other_wt], cwd=main, check=True,
+                       capture_output=True)
+        calls = []
+        p1, p2 = self.herdr_on(self.with_git(self.fake_herdr(calls, panes)))
+        with p1, p2, mock.patch.dict(os.environ, {'HERDR_ENV': '1', 'HERDR_WORKSPACE_ID': 'w6'}):
+            code, out = self.run_cli('spawn', 'api-2', '--repo', other_wt)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.spawned_in(calls), ('w6', other_wt, 'api-2'))
+
+    def test_herdr_lane_falls_back_to_the_coordinators_workspace(self):
+        self.run_cli('init', '--backend', 'herdr')
+        panes = [{'pane_id': 'w5:p1', 'tab_id': 'w5:t1', 'workspace_id': 'w5', 'cwd': '/coord/home'}]
+        calls = []
+        p1, p2 = self.herdr_on(self.with_git(self.fake_herdr(calls, panes)))
+        with p1, p2, mock.patch.dict(os.environ, {'HERDR_ENV': '1', 'HERDR_WORKSPACE_ID': 'w5'}):
+            code, out = self.run_cli('spawn', 'w1', '--repo', str(self.root / 'nowhere'))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.spawned_in(calls), ('w5', str(self.root / 'nowhere'), 'w1'))
+        self.assertFalse(any(c[:3] == ['herdr', 'workspace', 'create'] for c in calls))
+
+    def test_herdr_lane_makes_a_workspace_only_when_nothing_fits_or_when_asked(self):
+        self.run_cli('init', '--backend', 'herdr')
+        # the coordinator's workspace id is stale (not in the pane list): nothing fits
+        calls = []
+        p1, p2 = self.herdr_on(self.with_git(self.fake_herdr(calls, [])))
+        with p1, p2, mock.patch.dict(os.environ, {'HERDR_ENV': '1', 'HERDR_WORKSPACE_ID': 'w5'}):
+            code, out = self.run_cli('spawn', 'w1')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.spawned_in(calls)[0], 'w9')
+        # herdrWorkspace new: a workspace per repo path, even with the coordinator's workspace live
+        panes = [{'pane_id': 'w5:p1', 'tab_id': 'w5:t1', 'workspace_id': 'w5', 'cwd': '/coord/home'}]
+        calls = []
+        p1, p2 = self.herdr_on(self.with_git(self.fake_herdr(calls, panes)))
+        with p1, p2, mock.patch.dict(os.environ, {'HERDR_ENV': '1', 'HERDR_WORKSPACE_ID': 'w5'}):
+            code, out = self.run_cli('spawn', 'w2', '--herdr-workspace', 'new')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.spawned_in(calls)[0], 'w9')
+        code, out = self.run_cli('lanes', '--herdr-workspace', 'tabs')
+        self.assertNotEqual(code, 0)
+        self.assertIn('herdrWorkspace must be reuse or new', out)
+
+    def test_herdr_usage_probe_opens_in_the_coordinators_workspace(self):
+        self.run_cli('init', '--backend', 'herdr')
+        cfg = coord.Config(self.root)
+        out = io.StringIO()
+        with redirect_stdout(out), mock.patch.dict(os.environ, {'HERDR_ENV': '1', 'HERDR_WORKSPACE_ID': 'w5'}):
+            coord.probe_usage(cfg, dry=True)
+        self.assertIn('herdr tab create --workspace w5', out.getvalue())
+        self.assertNotIn('workspace create', out.getvalue())
 
     def test_herdr_unreadable_create_closes_the_tab_by_label(self):
         self.run_cli('init', '--backend', 'herdr')
