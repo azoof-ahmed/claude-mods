@@ -6,14 +6,16 @@ const CLI = 'python "/plugins/agent-bus/scripts/bus.py"'
 
 type Out = Record<string, unknown>
 
-/** Answers every `bus.py hook` run with `out`, and counts the runs. */
-function answerHook(on: On, out: Out, runs: string[][] = []) {
+/** Answers every `bus.py hook` run with `out`, and counts the runs (and their working directories). */
+function answerHook(on: On, out: Out, runs: string[][] = [], root = '/repo', cwds: (string | undefined)[] = []) {
   // No settings hooks beneath the plugin: each classic event answers nothing of its own.
   on('classic.SessionStart', () => ({}))
   on('classic.PostToolUse', () => ({}))
   on('classic.Stop', () => ({}))
+  on('session.root', () => ({ value: root }))
   on('process.run', ($, e) => {
     runs.push([...e.argv])
+    cwds.push(e.init?.cwd)
     return {
       value: {
         exitCode: 0,
@@ -142,4 +144,33 @@ test('the no-bus message points at busDir in .claude/claude-mods.json', async ()
   expect(t).toContain('/bus init')
   expect(t).toContain('"busDir"')
   expect(t).toContain('.claude/claude-mods.json')
+})
+
+test('bus.py runs in the session project root, not wherever the agent cd-ed to', async ($, on) => {
+  const cwds: (string | undefined)[] = []
+  answerHook(on, { ...BASE, watch: true, text: null }, [], '/work/proj', cwds)
+  on('session.cwd', async () => ({ value: '/work/other-repo' }))
+  await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(cwds.length).toBeGreaterThan(0)
+  expect(cwds.every(c => c === '/work/proj')).toBe(true)
+})
+
+test('the watch it asks for is pinned to the bus the hook found', async ($, on) => {
+  answerHook(on, { ...BASE, watch: false, text: null })
+  const r = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(r.block).toContain('watch --as worker-a --for 1790 --dir "/repo/.claude/bus"')
+})
+
+test('an idle role with nothing live to send it mail is not asked to arm a watch', async ($, on) => {
+  answerHook(on, { ...BASE, role: 'coordinator', watch: false, text: null, needWatch: false })
+  const start = await $.classic.SessionStart({ source: 'startup' } as never)
+  expect((start.additionalContext ?? []).join('\n')).not.toContain('Monitor')
+  const stop = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(stop.block).toBeUndefined()
+})
+
+test('mail still wakes an idle role that needs no watch', async ($, on) => {
+  answerHook(on, { ...BASE, watch: false, needWatch: true, text: 'Bus mail for worker-a: [bus m3 from user] hi' })
+  const r = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(r.block).toContain('[bus m3 from user] hi')
 })
