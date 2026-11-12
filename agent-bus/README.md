@@ -50,6 +50,10 @@ The agent itself uses the CLI that its session context names: `python "<plugin>/
 
 **How "a watch is live" is known:** `bus watch` writes a heartbeat (`inbox/<role>.watch.json`, refreshed every 30 s, stale after 90 s). The hooks and the daemon read it, so nobody is asked to arm a second Monitor and nobody is nudged while one listens.
 
+**When no watch is asked for:** only while something can send the role mail. In a project with coordinator lanes (`lanes.json` in the coordinator's `cardsDir`), a role is not asked to arm a watch once every lane is retired (no lane `live` or `retiring`, apart from the coordinator's own) and no other role has a live watch, so an idle coordinator with nothing running is not asked to re-arm every 30 minutes. Unread mail still wakes it. A project without coordinator lanes is always asked.
+
+**Which bus the hooks use:** the hooks run `bus.py` in the session's project root (where it started, or where `/cd` took it), not in the directory a shell `cd` left it in, so the project's `.claude/claude-mods.json` `busDir` wins over the plugin's `busDir` option. The watch command they ask for carries `--dir <that bus>`, so the Monitor listens on the same bus wherever its shell is.
+
 `fyi` mail is never pushed. It waits in `bus digest`.
 
 ## The global channel: one message to every session on the machine

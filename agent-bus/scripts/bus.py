@@ -686,6 +686,59 @@ def start_heartbeat(root, role):
     return clear
 
 
+# ---- does this role need a watch? Only while something that can send it mail is live.
+
+LIVE_LANE_STATES = ('live', 'retiring')
+
+
+def coord_lanes(root):
+    """The coordinator plugin's lanes.json for this project, or None when the project has none. Its cardsDir resolves
+    like coord.py's: <project>/.claude/claude-mods.json "coordinator" > COORD_CARDS_DIR > .claude/coord/lanes."""
+    root = Path(root)
+    cards = os.environ.get('COORD_CARDS_DIR') or '.claude/coord/lanes'
+    try:
+        section = json.loads((root / '.claude' / 'claude-mods.json').read_text(encoding='utf-8')).get('coordinator')
+        if isinstance(section, dict) and section.get('cardsDir'):
+            cards = section['cardsDir']
+    except (OSError, ValueError, AttributeError):
+        pass
+    d = Path(cards)
+    try:
+        lanes = json.loads(((d if d.is_absolute() else root / d) / 'lanes.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return lanes if isinstance(lanes, dict) else None
+
+
+def other_watches_live(bus_root, role, now=None):
+    """Whether any other role has a live watch: a session that is up and can send mail."""
+    try:
+        names = [p.name[:-len('.watch.json')] for p in (Path(bus_root) / 'inbox').glob('*.watch.json')]
+    except OSError:
+        return False
+    return any(n != role and watch_live(bus_root, n, now) for n in names)
+
+
+def needs_watch(cfg, bus_root, role, now=None):
+    """Whether `role` should keep a watch armed. True while another role has a live watch, or while the project's
+    coordinator lanes show a live lane that can mail this role (any other live lane, or this role's own lane when it
+    is a worker, whose coordinator is then up). With every lane retired and no other watch, nothing can send mail, so
+    an idle coordinator is not asked to re-arm forever. A project without coordinator lanes keeps asking (unknown)."""
+    if other_watches_live(bus_root, role, now):
+        return True
+    lanes = coord_lanes(cfg['root'])
+    if lanes is None:
+        return True
+    for r, lane in lanes.items():
+        if not isinstance(lane, dict) or lane.get('state') not in LIVE_LANE_STATES:
+            continue
+        if r != role:
+            return True
+        if r != 'coordinator' and lane.get('kind') != 'coordinator':
+            return True  # a live worker lane: its coordinator can mail it
+    return False
+
+
 # ---- the hook: serve new mail between steps
 
 def serve(bus, role, event, line_v2):
@@ -952,6 +1005,7 @@ def main(argv=None):
             out['watch'] = watch_live(root, role)
             if entry.get('mode', 'file') == 'file':
                 out['text'] = serve(bus, role, event, line_v2)
+            out['needWatch'] = bool(out['text']) or needs_watch(cfg, root, role)
         out['text'] = join_text(global_hook_text(cfg, role, session), out['text'])
         if cfg['global']:
             out['globalLog'] = str(Path(cfg['globalDir'], 'global.jsonl').as_posix())

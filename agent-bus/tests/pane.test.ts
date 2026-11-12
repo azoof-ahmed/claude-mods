@@ -40,6 +40,7 @@ function fakeBus(on: On, world: World) {
   mock.env(on, {})
   mock.store(on)
   on('session.start', async ($$, e) => ({ cwd: e.cwd }))
+  on('session.root', async () => ({ value: '/work/proj' }))
   on('command.register', async ($$, e) => ({ value: { command: e.name } }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
   on('ui.focus', async () => ({}))

@@ -19,7 +19,7 @@ from orca_bus.store import Bus  # noqa: E402
 
 CLEAN = {k: '' for k in list(bus.ENV.values()) + ['AGENT_BUS_ROLE', 'ORCA_BUS_NAME', 'ORCA_TERMINAL_HANDLE',
                                                    'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'HERDR_ENV',
-                                                   'HERDR_PANE_ID', 'HERDR_WORKSPACE_ID']}
+                                                   'HERDR_PANE_ID', 'HERDR_WORKSPACE_ID', 'COORD_CARDS_DIR']}
 # Tests never touch the real machine-wide channel: every run gets a throwaway global dir and no piforge.
 _GLOBAL_TMP = tempfile.mkdtemp(prefix='agent-bus-global-test-')
 CLEAN['AGENT_BUS_GLOBAL_DIR'] = str(Path(_GLOBAL_TMP) / 'g')
@@ -114,6 +114,67 @@ class BusCliTest(unittest.TestCase):
         run(['send', 'worker-a', 'just so you know', '--prio', 'fyi'], self.root, AGENT_BUS_ROLE='coordinator')
         _, out = run(['hook', '--event', 'Stop'], self.root, AGENT_BUS_ROLE='worker-a')
         self.assertIsNone(json.loads(out)['text'])
+
+    def lanes(self, **states):
+        d = self.root / '.claude' / 'coord' / 'lanes'
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'lanes.json').write_text(json.dumps({r: {'role': r, 'state': st} for r, st in states.items()}))
+
+    def stop_hook(self, role):
+        _, out = run(['hook', '--event', 'Stop'], self.root, AGENT_BUS_ROLE=role)
+        return json.loads(out)
+
+    def test_no_watch_needed_when_every_lane_is_retired(self):
+        run(['init', '--roles', 'coordinator,worker-a,worker-b'], self.root)
+        self.lanes(**{'worker-a': 'closed', 'worker-b': 'paused', 'coordinator': 'live'})
+        got = self.stop_hook('coordinator')
+        self.assertFalse(got['watch'])
+        self.assertIs(got['needWatch'], False)
+
+    def test_a_live_lane_or_another_live_watch_needs_a_watch(self):
+        run(['init', '--roles', 'coordinator,worker-a,worker-b'], self.root)
+        self.lanes(**{'worker-a': 'live', 'worker-b': 'closed'})
+        self.assertIs(self.stop_hook('coordinator')['needWatch'], True)
+        self.assertIs(self.stop_hook('worker-a')['needWatch'], True)  # its coordinator can mail it
+        self.lanes(**{'worker-a': 'retiring'})
+        self.assertIs(self.stop_hook('coordinator')['needWatch'], True)
+        self.lanes(**{'worker-a': 'closed'})
+        self.assertIs(self.stop_hook('coordinator')['needWatch'], False)
+        clear = bus.start_heartbeat(self.dir, 'worker-b')  # a session outside the lanes that is up
+        try:
+            time.sleep(0.2)
+            self.assertIs(self.stop_hook('coordinator')['needWatch'], True)
+        finally:
+            clear()
+
+    def test_unread_mail_or_no_lanes_file_still_needs_a_watch(self):
+        run(['init', '--roles', 'coordinator,worker-a'], self.root)
+        self.assertIs(self.stop_hook('coordinator')['needWatch'], True)  # no coordinator lanes: unknown, keep asking
+        self.lanes(**{'worker-a': 'closed'})
+        run(['send', 'coordinator', 'late report'], self.root, AGENT_BUS_ROLE='worker-a')
+        got = self.stop_hook('coordinator')
+        self.assertIn('late report', got['text'])
+        self.assertIs(got['needWatch'], True)
+
+    def test_lanes_dir_comes_from_the_project_file_over_the_env(self):
+        run(['init', '--roles', 'coordinator,worker-a'], self.root)
+        (self.root / '.claude' / 'claude-mods.json').write_text(json.dumps({'coordinator': {'cardsDir': 'tmp/coord/lanes'}}))
+        d = self.root / 'tmp' / 'coord' / 'lanes'
+        d.mkdir(parents=True)
+        (d / 'lanes.json').write_text(json.dumps({'worker-a': {'state': 'closed'}}))
+        other = self.root / 'elsewhere'
+        other.mkdir()
+        (other / 'lanes.json').write_text(json.dumps({'worker-a': {'state': 'live'}}))
+        _, out = run(['hook', '--event', 'Stop'], self.root, AGENT_BUS_ROLE='coordinator', COORD_CARDS_DIR=str(other))
+        self.assertIs(json.loads(out)['needWatch'], False)
+
+    def test_hook_in_the_project_root_uses_the_project_bus_over_the_plugin_option(self):
+        (self.root / '.claude').mkdir()
+        (self.root / '.claude' / 'claude-mods.json').write_text(json.dumps({'agent-bus': {'busDir': 'tmp/coord/bus'}}))
+        run(['init', '--roles', 'coordinator'], self.root)
+        other = Path(self.tmp.name) / 'other-project-bus'
+        _, out = run(['hook', '--event', 'Stop'], self.root, AGENT_BUS_ROLE='coordinator', AGENT_BUS_DIR=str(other))
+        self.assertEqual(Path(json.loads(out)['dir']), (self.root / 'tmp' / 'coord' / 'bus').resolve())
 
     def test_heartbeat_live_and_stale(self):
         Bus(self.dir)

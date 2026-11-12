@@ -11,6 +11,8 @@ type HookOut = {
   text?: string | null
   watch?: boolean
   registered?: boolean
+  /** False when nothing that can send this role mail is live (every coordinator lane retired, no other watch). */
+  needWatch?: boolean
   cli?: string
   /** The machine-wide global channel's log; its size changing means a broadcast arrived. Absent: channel off. */
   globalLog?: string
@@ -66,9 +68,14 @@ function short(s: string | null | undefined, n: number): string {
   return t.length <= n ? t : t.slice(0, Math.max(0, n - 1)) + '…'
 }
 
-/** Runs `bus.py <args>` from this plugin's folder. */
+/**
+ * Runs `bus.py <args>` from this plugin's folder, in the session's project root: bus.py finds the bus from its
+ * working directory (<project>/.claude/claude-mods.json "agent-bus" beats the plugin's options), and the session's
+ * own working directory follows the agent's `cd` into other repos, where the project's file is not found.
+ */
 async function runBus($: $T, python: string, args: string[], timeoutMs: number) {
-  return $.process.run([python, `${$.plugin.root}/scripts/bus.py`, ...args], { timeoutMs })
+  const cwd = await $.session.root()
+  return $.process.run([python, `${$.plugin.root}/scripts/bus.py`, ...args], { cwd, timeoutMs })
 }
 
 /** Asks bus.py for this session's mail and state at a hook event. */
@@ -149,7 +156,14 @@ export function busArgs(typed: string): string[] | string | null {
 
 /** The Monitor command that keeps an idle agent listening. */
 export function watchCommand(out: HookOut): string {
-  return `${out.cli} watch --as ${out.role} --for 1790`
+  // --dir pins the bus the hook found: the Monitor's shell may sit in another repo, which would resolve another bus.
+  const dir = out.dir ? ` --dir "${out.dir}"` : ''
+  return `${out.cli} watch --as ${out.role} --for 1790${dir}`
+}
+
+/** Whether to ask this session to arm a watch: a role, no live watch, and something live that can send it mail. */
+export function wantsWatch(out: HookOut): boolean {
+  return out.registered === true && !out.watch && out.needWatch !== false
 }
 
 export function armLine(out: HookOut): string {
@@ -751,7 +765,7 @@ export const register: Register = (on, options) => {
         `agent-bus: you are \`${out.role}\`. Bus CLI: \`${out.cli}\` (send <to> "<one line>" [--prio urgent|normal|fyi] ` +
           '[--re <id>], digest, read <id>, react <id> <emoji>). New mail reaches you after tool calls; no acks.',
       )
-      if (monitorOn && out.registered && !out.watch) {
+      if (monitorOn && wantsWatch(out)) {
         lines.push(armLine(out))
       }
       if (out.text) {
@@ -810,7 +824,7 @@ export const register: Register = (on, options) => {
       return { ...result, block: out.text }
     }
     const now = Date.now()
-    if (monitorOn && out.registered && !out.watch && now - lastReminder > REMIND_EVERY_MS) {
+    if (monitorOn && wantsWatch(out) && now - lastReminder > REMIND_EVERY_MS) {
       lastReminder = now
       return { ...result, block: `${armLine(out)} Then you may go idle.` }
     }
