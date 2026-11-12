@@ -1,6 +1,6 @@
 {
   "name": "agent-bus",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca or herdr terminals, a /bus chat pane, an unread band and a localhost web chat show it all. A machine-wide global channel reaches every session, with a global pause/resume. Built on orca-bus.",
   "author": {
     "name": "Azoof Ahmed"

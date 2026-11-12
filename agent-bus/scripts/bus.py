@@ -52,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import global_bus  # noqa: E402
+import herdr_env  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 WATCH_BEAT_S = 30       # the watch writes its heartbeat this often
@@ -89,9 +90,10 @@ BACKENDS = ('none', 'orca', 'herdr', 'auto')
 
 
 def detect_backend(env=None):
-    """`auto`: herdr inside a herdr pane, orca inside an Orca terminal, else none (nothing is typed)."""
+    """`auto`: herdr inside a herdr pane, orca inside an Orca terminal, else none (nothing is typed). A session that
+    lost its herdr variables (inside tmux) gets them back at start (herdr_env.recover)."""
     env = os.environ if env is None else env
-    if env.get('HERDR_ENV') == '1' and env.get('HERDR_PANE_ID'):
+    if herdr_env.here(env):
         return 'herdr'
     if env.get('ORCA_TERMINAL_HANDLE'):
         return 'orca'
@@ -1060,7 +1062,7 @@ def main(argv=None):
     if verb == 'tui':
         return tui_verb(argv[1:], cfg, root)
 
-    if verb == 'register' and '--handle' not in argv and detect_backend() == 'herdr':
+    if verb == 'register' and '--handle' not in argv and detect_backend() == 'herdr' and term_handle():
         argv += ['--handle', term_handle()]  # orca-bus only knows ORCA_TERMINAL_HANDLE
     if verb in ('send', 'digest', 'read', 'ack', 'react', 'sub', 'unsub', 'pin', 'unpin', 'delete', 'edit',
                 'inbox') and '--as' not in argv and '--from' not in argv:
@@ -1075,4 +1077,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    herdr_env.recover()  # a session inside tmux in a herdr pane: find the pane
     sys.exit(main())

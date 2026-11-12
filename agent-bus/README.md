@@ -336,7 +336,7 @@ The bus's `config.json` holds `reply_cmd`, the command printed in every reply hi
 3. the bus registry entry for this terminal: `HERDR_PANE_ID` inside herdr, else `ORCA_TERMINAL_HANDLE`;
 4. the `role` option.
 
-**herdr:** with the herdr backend (or `auto` in a herdr pane) the CLI swaps `scripts/herdr_term.py` in for orca-bus's Orca wrapper, so the deliver daemon, `send --now`, `who` and the web chat's liveness use herdr panes; a terminal handle is a pane id. `register` inside herdr records `HERDR_PANE_ID` as the handle. herdr reports no composer text, so the input box is read from the screen. When an agent's title carries no state glyph (an agent inside tmux, as claude-auto-retry runs it), herdr's own idle/working reading stands in for it.
+**herdr:** with the herdr backend (or `auto` in a herdr pane) the CLI swaps `scripts/herdr_term.py` in for orca-bus's Orca wrapper, so the deliver daemon, `send --now`, `who` and the web chat's liveness use herdr panes; a terminal handle is a pane id. `register` inside herdr records `HERDR_PANE_ID` as the handle. A session inside tmux in a herdr pane (claude-auto-retry) gets its herdr variables back at start, from the attached tmux client or the running herdr sessions (`scripts/herdr_env.py`, shared with the coordinator; `HERDR_DISCOVER=0` turns it off); when only the herdr session is known, not the pane, it registers without a handle. herdr reports no composer text, so the input box is read from the screen. When an agent's title carries no state glyph (an agent inside tmux, as claude-auto-retry runs it), herdr's own idle/working reading stands in for it.
 
 ## Files
 
