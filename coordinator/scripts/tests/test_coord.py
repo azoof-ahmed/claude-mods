@@ -622,7 +622,7 @@ class CoordTest(unittest.TestCase):
         d = coord.detect_backend
         self.assertEqual(d({'HERDR_ENV': '1', 'HERDR_PANE_ID': 'w1:p1', 'TMUX': '/tmp/t', 'ORCA_TERMINAL_HANDLE': 'x'}),
                          'herdr')
-        self.assertEqual(d({'ORCA_TERMINAL_HANDLE': 'term_a', 'TMUX': '/tmp/t'}), 'orca')
+        self.assertEqual(d({'ORCA_TERMINAL_HANDLE': 'term_a', 'TMUX': '/tmp/t'}, orca_up=lambda: True), 'orca')
         self.assertEqual(d({'TMUX': '/tmp/t'}), 'tmux')
         self.assertEqual(d({'HERDR_ENV': '1'}), 'manual')  # no pane: nothing to open a tab beside
         self.assertEqual(d({}), 'manual')
@@ -635,6 +635,78 @@ class CoordTest(unittest.TestCase):
         code, out = self.run_cli('lanes', '--backend', 'kitty')
         self.assertNotEqual(code, 0)
         self.assertIn('auto, orca, herdr, tmux, wt or manual', out)
+
+    def test_auto_skips_orca_when_its_app_is_not_running(self):
+        d = coord.detect_backend
+        down = lambda: False  # noqa: E731
+        self.assertEqual(d({'ORCA_TERMINAL_HANDLE': 'term_a', 'TMUX': '/tmp/t'}, orca_up=down), 'tmux')
+        with mock.patch.object(coord.shutil, 'which', lambda n: '/opt/homebrew/bin/tmux' if n == 'tmux' else None):
+            self.assertEqual(d({'ORCA_TERMINAL_HANDLE': 'term_a'}, orca_up=down), 'tmux')  # tmux runs, not inside it
+        with mock.patch.object(coord.shutil, 'which', lambda n: None):
+            self.assertEqual(d({'ORCA_TERMINAL_HANDLE': 'term_a'}, orca_up=down), 'manual')
+        with mock.patch.object(coord, 'orca_runtime_path', lambda: self.root / 'no-such' / 'orca-runtime.json'):
+            self.assertFalse(coord.orca_app_up())
+        rt = self.root / 'orca-runtime.json'
+        rt.write_text('{}')
+        with mock.patch.object(coord, 'orca_runtime_path', lambda: rt):
+            self.assertTrue(coord.orca_app_up())
+
+    ORCA_DOWN_ERR = ('{"ok":false,"error":{"code":"runtime_unavailable","message":"Could not read Orca runtime metadata at '
+                     '~/Library/Application Support/orca/orca-runtime.json. Start the Orca app first."}}')
+
+    def fake_orca_down(self, calls):
+        def run(argv, dry=False, **kw):
+            calls.append(argv)
+            if argv[0] == 'orca':
+                return coord.subprocess.CompletedProcess(argv, 1, self.ORCA_DOWN_ERR, '')
+            if argv[:2] == ['tmux', 'new-window']:
+                return coord.subprocess.CompletedProcess(argv, 0, '@7\n', '')
+            return coord.subprocess.CompletedProcess(argv, 0, '', '')
+        return run
+
+    def test_auto_spawn_falls_back_to_tmux_when_orca_create_is_runtime_unavailable(self):
+        # the app looked up when auto resolved (stale metadata), but create says runtime_unavailable
+        self.run_cli('init', '--backend', 'auto')
+        cfg = coord.Config(self.root)
+        calls = []
+        with mock.patch.dict(os.environ, {'ORCA_TERMINAL_HANDLE': 'term_me', 'TMUX': ''}), \
+                mock.patch.object(coord, 'orca_app_up', lambda: True), \
+                mock.patch.object(coord.shutil, 'which', lambda n: '/usr/bin/tmux' if n == 'tmux' else None), \
+                mock.patch.object(coord, 'run', self.fake_orca_down(calls)), \
+                mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            self.assertEqual(coord.open_terminal(cfg, 'forge', str(self.root), 'claude'), ('@7', 'tmux'))
+        self.assertIn("the Orca app isn't running", out.getvalue())
+        self.assertIn('using tmux instead', out.getvalue())
+        self.assertIn('tmux attach -t coord', out.getvalue())
+        win = next(c for c in calls if c[:2] == ['tmux', 'new-window'])
+        self.assertIn('AGENT_BUS_ROLE=forge', win)
+        self.assertFalse(any(c[:3] == ['orca', 'terminal', 'close'] for c in calls))
+
+    def test_auto_spawn_says_so_when_it_skips_orca_up_front(self):
+        self.run_cli('init', '--backend', 'auto')
+        cfg = coord.Config(self.root)
+        calls = []
+        with mock.patch.dict(os.environ, {'ORCA_TERMINAL_HANDLE': 'term_me', 'TMUX': ''}), \
+                mock.patch.object(coord, 'orca_app_up', lambda: False), \
+                mock.patch.object(coord.shutil, 'which', lambda n: '/usr/bin/tmux' if n == 'tmux' else None), \
+                mock.patch.object(coord, 'run', self.fake_orca_down(calls)), \
+                mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            self.assertEqual(coord.open_terminal(cfg, 'forge', str(self.root), 'claude'), ('@7', 'tmux'))
+        self.assertFalse(any(c[0] == 'orca' for c in calls))
+        self.assertIn('using tmux instead', out.getvalue())
+
+    def test_explicit_orca_backend_explains_a_closed_app(self):
+        self.run_cli('init')
+        cfg = coord.Config(self.root)
+        cfg['backend'] = 'orca'
+        calls = []
+        with mock.patch.object(coord, 'run', self.fake_orca_down(calls)):
+            with self.assertRaises(SystemExit) as e:
+                coord.open_terminal(cfg, 'forge', str(self.root), 'claude')
+        msg = str(e.exception)
+        self.assertIn("the Orca app isn't running", msg)
+        self.assertIn('"backend" to "tmux"', msg)
+        self.assertFalse(any(c[:2] == ['tmux', 'new-window'] for c in calls))
 
     def fake_herdr(self, calls, panes, labels=None, create_ok=True):
         """A herdr server: `panes` is its pane list (mutated by tab create/close), `labels` tab id -> label."""
