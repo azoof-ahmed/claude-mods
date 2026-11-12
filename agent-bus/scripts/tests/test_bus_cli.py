@@ -437,6 +437,10 @@ class BusCliTest(unittest.TestCase):
         self.assertEqual(bus.detect_backend({'TMUX': '/tmp/t'}), 'none')
         self.assertEqual(bus.term_handle({**self.HERDR, 'ORCA_TERMINAL_HANDLE': 'term_a'}), 'w2:p4')
         self.assertEqual(bus.term_handle({'ORCA_TERMINAL_HANDLE': 'term_a'}), 'term_a')
+        # recovered inside tmux without a pane id: herdr by its session's socket, and no handle to register
+        pane_less = {'HERDR_ENV': '1', 'HERDR_SOCKET_PATH': '/s/herdr.sock'}
+        self.assertEqual(bus.detect_backend(pane_less), 'herdr')
+        self.assertIsNone(bus.term_handle(pane_less))
         with mock.patch.dict(os.environ, {**CLEAN, **self.HERDR, 'AGENT_BUS_BACKEND': 'auto'}):
             cfg = bus.load_config({}, root=self.root)
         self.assertEqual((cfg['backend'], cfg['backendSetting']), ('herdr', 'auto'))

@@ -37,6 +37,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import herdr_env  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE.parent / 'templates'
 
@@ -101,9 +104,11 @@ def tmux_or_manual(env=None):
 def detect_backend(env=None, orca_up=None):
     """`auto`: herdr inside a herdr pane (HERDR_ENV=1), orca inside an Orca terminal while the Orca app runs, tmux
     inside tmux, else manual. herdr is checked first: a herdr pane that runs the agent inside tmux (claude-auto-retry)
-    still has HERDR_ENV. An Orca terminal whose app isn't running falls back to tmux (or manual without tmux)."""
+    still has HERDR_ENV. An Orca terminal whose app isn't running falls back to tmux (or manual without tmux).
+    A session whose environment lost its herdr variables gets them back before this (herdr_env.recover, at start),
+    possibly without a pane id but with the herdr session's socket: that counts as herdr too."""
     env = os.environ if env is None else env
-    if env.get('HERDR_ENV') == '1' and env.get('HERDR_PANE_ID'):
+    if herdr_env.here(env):
         return 'herdr'
     if env.get('ORCA_TERMINAL_HANDLE'):
         if (orca_up or orca_app_up)():
@@ -1774,4 +1779,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    herdr_env.recover(orca_up=orca_app_up)  # a session inside tmux in a herdr pane: find the pane
     sys.exit(main())
