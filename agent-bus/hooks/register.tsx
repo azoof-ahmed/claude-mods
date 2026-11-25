@@ -436,11 +436,11 @@ export const register: Register = (on, options) => {
     // and a Monitor's watch use the same configuration as the hooks.
     // Paths belong to one project: these two are no longer offered as options, and still passed on for one version.
     const given: Readonly<Record<string, unknown>> = options
-    for (const [key, name] of [['busDir', 'AGENT_BUS_DIR'], ['tasksDb', 'AGENT_BUS_TASKS_DB']] as const) {
-      const value = str(given[key], '')
-      if (value !== '') {
-        await $.env.set(name, value)
-      }
+    if (str(given.busDir, '') !== '') {
+      await $.env.set('AGENT_BUS_DIR', str(given.busDir, ''))
+    }
+    if (str(given.tasksDb, '') !== '') {
+      await $.env.set('AGENT_BUS_TASKS_DB', str(given.tasksDb, ''))
     }
     await $.env.set('AGENT_BUS_BACKEND', str(options.backend, 'none'))
     await $.env.set('AGENT_BUS_NUDGE_AFTER', String(options.nudgeAfter ?? 300))
