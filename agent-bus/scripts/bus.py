@@ -229,6 +229,10 @@ def broadcast_verb(argv, cfg, role):
     if not cfg['global']:
         print('agent-bus: the global channel is off (AGENT_BUS_GLOBAL=off)', file=sys.stderr)
         return 2
+    words = []
+    if '--' in argv:  # what follows is text
+        i = argv.index('--')
+        argv, words = argv[:i], argv[i + 1:]
     g = open_global(cfg)
     if argv[:1] == ['--status'] or argv[:1] == ['status']:
         return global_verb(['status'], cfg)
@@ -245,7 +249,7 @@ def broadcast_verb(argv, cfg, role):
         if flag in argv:
             kind = k
             argv.remove(flag)
-    text = ' '.join(argv)
+    text = ' '.join(argv + words)
     if kind == 'pause' and not text.strip():
         print('agent-bus: a pause needs a reason: broadcast --pause "<reason>"', file=sys.stderr)
         return 2
@@ -953,8 +957,8 @@ FLAGS = {
 FLAG_RE = re.compile(r'-[A-Za-z]|--[A-Za-z][\w-]*(=.*)?', re.S)
 
 
-def flag_error(verb, args):
-    """Why these arguments are refused, or None."""
+def flag_error(verb, args, short=True):
+    """Why these arguments are refused, or None. short=False: a single-dash word is text."""
     known = FLAGS.get(verb)
     i = 0
     while known is not None and i < len(args):
@@ -963,7 +967,7 @@ def flag_error(verb, args):
             if i + 1 >= len(args):
                 return f'{a} needs a value'
             i += 1
-        elif FLAG_RE.fullmatch(a) and a not in known:
+        elif FLAG_RE.fullmatch(a) and a not in known and (short or a.startswith('--')):
             return f'unknown flag {a}'
         i += 1
     return None
@@ -1027,6 +1031,11 @@ def main(argv=None):
         return 2
     refused = None
     bad = f'unknown flag {verb}' if FLAG_RE.fullmatch(verb) else flag_error(verb, argv[1:end])
+    if verb == 'broadcast' and not bad:  # it reaches everyone: a mistyped flag among the words is not sent as text
+        stop = argv.index('--') if '--' in argv else len(argv)
+        bad = flag_error(verb, argv[end:stop], short=False)
+        if bad:
+            bad = f'nothing was sent: {bad} after the text; quote the text as one argument, or put -- before it'
     if bad:
         print(f'agent-bus: {bad} (--help lists the flags)', file=sys.stderr)
         return 2

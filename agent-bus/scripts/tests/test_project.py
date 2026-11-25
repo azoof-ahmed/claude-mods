@@ -47,7 +47,9 @@ class Places(unittest.TestCase):
 
     def section(self, root, name, **keys):
         (root / '.claude').mkdir(exist_ok=True)
-        (root / '.claude' / 'claude-mods.json').write_text(json.dumps({name: keys}), encoding='utf-8')
+        f = root / '.claude' / 'claude-mods.json'
+        data = json.loads(f.read_text(encoding='utf-8')) if f.exists() else {}
+        f.write_text(json.dumps({**data, name: keys}), encoding='utf-8')
 
     def cli(self, cwd, *args, **env):
         r = subprocess.run([sys.executable, str(SCRIPTS / 'bus.py'), *args], cwd=cwd, env={**self.env, **env},
@@ -111,6 +113,7 @@ class ProjectTest(Places):
 
     def test_the_hand_over_wins_in_a_worktree_of_its_project(self):
         lane = f'{self.alpha.as_posix()}#w'
+        self.section(self.alpha, SECTION)
         self.section(self.lane, SECTION)
         (self.lane / STATE).mkdir(parents=True)
         self.assertEqual(self.found(self.lane, lane), self.alpha)
@@ -119,6 +122,7 @@ class ProjectTest(Places):
 
     def test_the_hand_over_wins_in_the_lanes_repository_whatever_is_there(self):
         lane = f'{self.alpha.as_posix()}#w'
+        self.section(self.alpha, SECTION)
         self.lane_record(self.alpha, w=self.beta)
         (self.beta / STATE).mkdir(parents=True)
         self.section(self.beta, SECTION)
@@ -128,6 +132,7 @@ class ProjectTest(Places):
         self.assertEqual(self.found(self.beta, lane, init=True), self.beta)
 
     def test_the_hand_over_is_not_followed_anywhere_else(self):
+        self.section(self.alpha, SECTION)
         self.section(self.alpha, 'coordinator', repos='.')
         self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#w'), self.beta)  # no record
         self.lane_record(self.alpha, w=self.alpha)
@@ -139,9 +144,33 @@ class ProjectTest(Places):
         for bad in ('', 'w', '#w', f'{self.home.as_posix()}/none#w', f'{self.home.as_posix()}#w'):
             self.assertEqual(self.found(self.beta, bad), self.beta, bad)
 
-    def test_a_session_without_a_record_follows_the_projects_repos(self):
+    def test_the_projects_repos_are_followed_with_and_without_a_record(self):
+        self.section(self.alpha, SECTION)
         self.section(self.alpha, 'coordinator', repos='.,../beta')
         self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#usage-watch'), self.alpha)
+        self.lane_record(self.alpha, w=self.alpha)
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#w'), self.alpha)
+
+    def test_a_mod_the_coordinators_project_does_not_use_is_the_repositorys_own(self):
+        with mock.patch.dict(os.environ, self.env):
+            self.lane_record(self.alpha, w=self.beta)
+            lane = {'COORD_LANE': f'{self.alpha.as_posix()}#w'}
+            other = Path('.claude') / 'other'
+            self.assertEqual(project.resolve('other', other, self.beta, lane).root, self.beta)
+            (self.alpha / other).mkdir(parents=True)
+            self.assertEqual(project.resolve('other', other, self.beta, lane).root, self.alpha)
+
+    def test_a_worker_finds_what_its_coordinator_in_a_worktree_finds(self):
+        with mock.patch.dict(os.environ, self.env):
+            self.section(self.alpha, 'other')
+            self.section(self.lane, 'coordinator')
+            self.lane_record(self.lane, w=self.beta)
+            other = Path('.claude') / 'other'
+            lane = {'COORD_LANE': f'{self.lane.as_posix()}#w'}
+            for section, state, root in (('other', other, self.alpha), ('coordinator', Path('.claude') / 'coord', self.lane)):
+                self.assertEqual(project.resolve(section, state, self.lane, {}).root, root)
+                for cwd in (self.beta, self.lane, self.alpha):
+                    self.assertEqual(project.resolve(section, state, cwd, lane).root, root, (section, cwd))
 
     def test_a_bare_git_folder_beside_its_worktrees_has_no_main_checkout(self):
         (self.home / 'proj').mkdir()
@@ -225,6 +254,15 @@ class BusPathsTest(Places):
         env = {'AGENT_BUS_GLOBAL_DIR': str(self.top / 'global')}
         self.assertEqual(self.cli(self.alpha, 'broadcast', 'run', 'ls', '-h', '--from', 'a', **env)[0], 0)
         self.assertIn('run ls -h', self.cli(self.alpha, 'global', 'log', **env)[1])
+        for words in (['stop', '--too', 'x'], ['--from', 'a', 'stop', '--puase'], ['stop', '--to']):
+            code, _, err = self.unchanged(self.alpha, 'broadcast', *words, **env)
+            self.assertEqual(code, 2, words)
+            self.assertIn('quote the text', err)
+        self.assertEqual(self.cli(self.alpha, 'broadcast', '--from', 'a', '--', 'use', '--force', '--to', **env)[0], 0)
+        self.assertEqual(self.cli(self.alpha, 'broadcast', 'use --quoted words', '--from', 'a', **env)[0], 0)
+        log = self.cli(self.alpha, 'global', 'log', **env)[1]
+        self.assertIn('use --force --to', log)
+        self.assertIn('use --quoted words', log)
         self.cli(self.alpha, 'init', '--roles', 'a,b')
         code, _, err = self.cli(self.alpha, 'send', 'a', 'run', 'ls', '-h', '--from', 'b')
         self.assertEqual(code, 2)
