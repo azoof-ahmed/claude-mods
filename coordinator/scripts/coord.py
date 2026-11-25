@@ -23,7 +23,9 @@
     python coord.py config                              the resolved configuration
 
 Configuration (first match wins): flags > <project>/.claude/claude-mods.json "coordinator" > environment
-(COORD_<KEY>; the plugin's options arrive this way) > defaults. Keys: see DEFAULTS. `init` writes the resolved
+(COORD_<KEY>; the plugin's options arrive this way) > defaults. Paths (busDir, cardsDir, ..., repos) belong to one
+project: the environment may not point them outside it. A git worktree without its own section uses its main
+checkout's; a worker (COORD_LANE, set by spawn) uses its coordinator's project. Keys: see DEFAULTS. `init` writes the resolved
 values into the project file, so every worker, shell or not, shares them.
 """
 import json
@@ -36,6 +38,9 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import project  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE.parent / 'templates'
@@ -126,23 +131,23 @@ def env_key(k):
     return 'COORD_' + re.sub(r'(?<!^)(?=[A-Z])', '_', k).upper()
 
 
-def project_root(start=None):
-    here = Path(start or os.getcwd()).resolve()
-    for d in [here, *here.parents]:
-        if (d / '.git').exists() or (d / '.claude').is_dir():
-            return d
-    return here
+def find_project(start=None, init=False):
+    return project.resolve('coordinator', Path('.claude') / 'coord', start, init=init)
 
 
 class Config(dict):
     def __init__(self, root, flags=None):
         super().__init__(DEFAULTS)
-        self.root = root
-        self.file = root / '.claude' / 'claude-mods.json'
+        self.project = root if isinstance(root, project.Project) else project.Project(root)
+        self.root = self.project.root
+        self.file = self.project.file
+        from_env = set()
+        old = project.old_options('coordinator', PATHS + ('repos',))
         for k in DEFAULTS:
-            v = os.environ.get(env_key(k))
+            v = os.environ.get(env_key(k)) or old.get(k)
             if v:
                 self[k] = v
+                from_env.add(k)
         if self.file.exists():  # the project's own file beats the environment (the plugin's options arrive as env)
             try:
                 section = json.loads(self.file.read_text(encoding='utf-8')).get('coordinator') or {}
@@ -154,11 +159,17 @@ class Config(dict):
                         print(f'coordinator: {self.file}: unknown key "{k}" ignored; known keys: '
                               f'{", ".join(DEFAULTS)}', file=sys.stderr)
                 self.update({k: v for k, v in section.items() if k in DEFAULTS})
+                from_env -= set(section)
             except (ValueError, OSError, AttributeError) as ex:
                 print(f'coordinator: ignoring {self.file}: {ex}', file=sys.stderr)
         for k, v in (flags or {}).items():
             if v not in (None, ''):
                 self[k] = v
+                from_env.discard(k)
+        for k in PATHS + ('repos',):
+            if k in from_env:
+                for v in str(self[k]).split(',') if k == 'repos' else [self[k]]:
+                    self.project.check_env('coordinator', 'coordinator', k, env_key(k), v.strip(), DEFAULTS[k])
         for k in INTS:
             self[k] = int(self[k])
         for k in FLOATS + FLOATS_EXTRA:
@@ -779,8 +790,8 @@ def orphans(cfg, lanes, sessions=None, handles=None):
 
 def render(text, cfg, role='<role>'):
     vals = {
-        'role': role, 'rules': rel(cfg, cfg.path('rulesFile')), 'cards': rel(cfg, cfg.path('cardsDir')),
-        'briefs': rel(cfg, cfg.path('briefsDir')), 'reports': rel(cfg, cfg.path('reportsDir')),
+        'role': role, 'rules': root_rel(cfg, cfg.path('rulesFile')), 'cards': root_rel(cfg, cfg.path('cardsDir')),
+        'briefs': root_rel(cfg, cfg.path('briefsDir')), 'reports': root_rel(cfg, cfg.path('reportsDir')),
         'retire_tokens': f"{cfg['retireTokens'] // 1000}k", 'pause_percent': cfg['pauseSessionPercent'],
         'pause_weekly': cfg['pauseWeeklyPercent'],
         'coord': 'coord',  # the session context names the real command; plugin paths change between versions
@@ -790,17 +801,34 @@ def render(text, cfg, role='<role>'):
     return text
 
 
-def rel(cfg, p):
+def root_rel(cfg, p):
+    """A path from the project root, for text that stays in the project."""
     try:
         return Path(p).resolve().relative_to(cfg.root.resolve()).as_posix()
     except ValueError:
         return Path(p).as_posix()
 
 
+def rel_in(cfg, p, where):
+    """A path as someone working in `where` can open it: from the project root there, else absolute."""
+    p = Path(p)
+    if project.find_root(where) == cfg.root.resolve():
+        return root_rel(cfg, p)
+    return (p if p.is_absolute() else cfg.root / p).resolve().as_posix()
+
+
+def rel(cfg, p):
+    return rel_in(cfg, p, None)
+
+
+def lane_card(cfg, role, lane):
+    """The lane's card as the lane itself can open it."""
+    return rel_in(cfg, cfg.path('cardsDir') / f'{role}.md', (lane or {}).get('repo') or cfg.root)
+
+
 def cmd_init(cfg, args):
     force = '--force' in args
     roles = take(args, '--roles') or 'coordinator,scheduler'
-    made = []
     targets = {
         TEMPLATES / 'RULES_CORE.md': cfg.path('rulesFile'),
         TEMPLATES / 'lanes' / 'README.md': cfg.path('cardsDir') / 'README.md',
@@ -809,6 +837,13 @@ def cmd_init(cfg, args):
         TEMPLATES / 'briefs' / 'scheduler.md': cfg.path('briefsDir') / 'scheduler.md',
         TEMPLATES / 'HANDOFF_PROTOCOL.md': cfg.path('briefsDir') / 'HANDOFF_PROTOCOL.md',
     }
+    files = [d for d in targets.values() if force or not d.exists()] + [questions_file(cfg), lanes_file(cfg), cfg.file]
+    cli = bus_cli()
+    if cli:
+        files.append(cfg.path('busDir'))
+    cfg.project.refuse_outside('coordinator', files)
+    print('coordinator init writes:\n  ' + '\n  '.join(str(f) for f in files), flush=True)
+    made = []
     for src, dst in targets.items():
         if dst.exists() and not force:
             continue
@@ -821,7 +856,6 @@ def cmd_init(cfg, args):
         save_lanes(cfg, {})
     cfg.save()
     made.append(rel(cfg, cfg.file) + ' (config)')
-    cli = bus_cli()
     if cli:
         r = subprocess.run(cli + ['--dir', str(cfg.path('busDir')), 'init', '--roles', roles], capture_output=True,
                            **TEXT, cwd=cfg.root)
@@ -841,7 +875,7 @@ def is_coordinator(role, lane):
 
 def cmd_spawn(cfg, args):
     dry = '--dry-run' in args
-    repo = take(args, '--repo') or cfg.repos()[0]
+    repo = os.path.abspath(take(args, '--repo') or cfg.repos()[0])
     model = take(args, '--model')
     pos = [a for a in args if not a.startswith('--')]
     if not pos:
@@ -852,6 +886,10 @@ def cmd_spawn(cfg, args):
     brief = pos[1] if len(pos) > 1 else rel(cfg, cfg.path('briefsDir') / 'RESUME.md')
     if not (cfg.root / brief).exists() and not Path(brief).exists():
         raise SystemExit(f'coordinator: no brief at {brief}')
+    if project.find_root(repo) != cfg.root.resolve() and not Path(brief).is_absolute():
+        # the worker starts elsewhere, where a path from the project root names another file
+        found = cfg.root / brief if (cfg.root / brief).exists() else Path(brief)
+        brief = found.resolve().as_posix()
     lanes = load_lanes(cfg)
     coordinator = is_coordinator(role, lanes.get(role, {})) or '--coordinator' in args
     live = [r for r, l in lanes.items() if l.get('state') == 'live' and r != role and not is_coordinator(r, l)]
@@ -868,20 +906,36 @@ def cmd_spawn(cfg, args):
         if alive:
             raise SystemExit(f'coordinator: an earlier {role} is still running (pids {alive}); stop it first')
     cmd = worker_command(cfg, role, brief, model)
-    handle, how = open_terminal(cfg, role, repo, cmd, dry)
     if dry:
+        open_terminal(cfg, role, repo, cmd, dry)
         return 0
+    # the record comes first: the worker's first command looks its repository up in it
+    before = lanes.get(role)
+    gen = (before or {}).get('generation', 0) + 1
+    lanes[role] = {'role': role, 'brief': brief, 'repo': repo, 'backend': cfg.backend, 'handle': None, 'state': 'live',
+                   'started': now(), 'generation': gen, 'model': model or cfg['workerModel']}
+    if coordinator:
+        lanes[role]['kind'] = 'coordinator'
+    save_lanes(cfg, lanes)
+    try:
+        handle, how = open_terminal(cfg, role, repo, cmd, dry)
+    except BaseException:
+        lanes = load_lanes(cfg)
+        if before is None:
+            lanes.pop(role, None)
+        else:
+            lanes[role] = before
+        save_lanes(cfg, lanes)
+        raise
     if handle and how in ('orca', 'herdr'):
         bus(cfg, 'register', role, '--handle', handle, '--kind', 'claude', '--mode', 'file')
     elif bus_cli() and cfg.path('busDir').is_dir():
         bus(cfg, 'register', role, '--kind', 'claude', '--mode', 'file')
-    gen = lanes.get(role, {}).get('generation', 0) + 1
-    lanes[role] = {'role': role, 'brief': brief, 'repo': repo, 'backend': how, 'handle': handle, 'state': 'live',
-                   'started': now(), 'generation': gen, 'model': model or cfg['workerModel']}
+    opened = lanes[role]
+    lanes = load_lanes(cfg)
+    lanes[role] = {**opened, **lanes.get(role, {}), 'backend': how, 'handle': handle}
     if how == 'herdr' and handle in HERDR_OPENED:
         lanes[role].update({k: v for k, v in HERDR_OPENED[handle].items() if v})
-    if coordinator:
-        lanes[role]['kind'] = 'coordinator'
     save_lanes(cfg, lanes)
     print(f'{role}: started (generation {gen}, {how}{" " + handle if handle else ""}) on {brief}')
     return 0
@@ -896,7 +950,7 @@ def cmd_retire(cfg, args):
     lane = lanes.get(role)
     if not lane:
         raise SystemExit(f'coordinator: no lane {role}')
-    card = rel(cfg, cfg.path('cardsDir') / f'{role}.md')
+    card = lane_card(cfg, role, lane)
     text = (f'Retire now: update your lane card {card} (state, next 3 actions, anchors, open messages) so a successor '
             'can resume from it alone, finish or park the current step, then end with SAFE TO CLOSE.')
     r = bus(cfg, 'send', role, text, '--prio', 'urgent', '--from', 'coordinator', '--topic', 'retire')
@@ -1094,7 +1148,7 @@ def cmd_reap(cfg, args):
 def cmd_ask(cfg, args):
     frm = take(args, '--from') or os.environ.get('AGENT_BUS_ROLE') or 'coordinator'
     opts = take(args, '--options')
-    pos = [a for a in args if not a.startswith('--')]
+    pos = args  # free text, flag-like words included
     if not pos:
         raise SystemExit('usage: ask "<question>" [--from ROLE] [--options "a|b"]')
     n = len(load_questions(cfg)) + 1
@@ -1118,7 +1172,7 @@ def cmd_questions(cfg, args):
 
 
 def cmd_answer(cfg, args):
-    pos = [a for a in args if not a.startswith('--')]
+    pos = args  # what follows the id is text, flag-like words included
     if len(pos) < 2:
         raise SystemExit('usage: answer <qid> "<answer>"')
     qid, ans = pos[0], ' '.join(pos[1:])
@@ -1623,7 +1677,7 @@ def pause_tick(cfg, st, dry=False):
             interrupt(cfg, lane, dry)
             pl['state'], pl['closed_at'] = 'interrupted', now()
         elif t - pl['asked'] >= cfg['pauseReminderMin'] * 60 and not pl.get('reminded'):
-            tell(cfg, role, 'REMINDER: ' + PAUSE_TEXT.format(card=rel(cfg, cfg.path('cardsDir') / f'{role}.md'))
+            tell(cfg, role, 'REMINDER: ' + PAUSE_TEXT.format(card=lane_card(cfg, role, lane))
                  + f" You will be interrupted in {int(cfg['pauseGraceMin'] - cfg['pauseReminderMin'])} min.")
             pl['reminded'] = now()
         if pl['state'] in ('paused', 'interrupted') and role in lanes:
@@ -1651,7 +1705,7 @@ def cmd_pause(cfg, args):
             st = {'state': 'pausing', 'started_at': now(), 'started': clock(),
                   'lanes': {r: {'state': 'asked', 'asked': clock()} for r in live}}
             for r in live:
-                tell(cfg, r, PAUSE_TEXT.format(card=rel(cfg, cfg.path('cardsDir') / f'{r}.md')))
+                tell(cfg, r, PAUSE_TEXT.format(card=lane_card(cfg, r, lanes.get(r))))
             print(f"pause: asked {len(live)} lane(s) to checkpoint: {', '.join(live) or 'none'}. Reminder after "
                   f"{cfg['pauseReminderMin']:g} min, interrupt after {cfg['pauseGraceMin']:g} min.")
     while True:
@@ -1752,24 +1806,121 @@ VERBS = {
 }
 
 
+# What each verb takes: flags alone, and flags with a value. Anything else that looks like a flag is an error.
+FLAGS = {
+    'init': ('--force', '--roles='), 'spawn': ('--dry-run', '--coordinator', '--repo=', '--model='),
+    'retire': ('--close', '--dry-run'), 'respawn': ('--dry-run',), 'lanes': ('--json',),
+    'close-idle': ('--dry-run',), 'reap': ('--dry-run',), 'ask': ('--from=', '--options='), 'questions': ('--all',),
+    'preflight': ('--min-ram-gb=', '--min-battery=', '--max-user-idle-s='),
+    'usage': ('--probe', '--json', '--debug', '--dry-run'),
+    'usage-watch': ('--start', '--once', '--probe', '--debug', '--dry-run'),
+    'pause': ('--tick', '--wait', '--now', '--dry-run'), 'paused': ('--role=',), 'resume': ('--dry-run',),
+    'record-usage': ('--alert', '--week=', '--session=', '--source='),
+}
+GLOBAL_FLAGS = ('--backend=', '--repos=', '--worker-model=', '--max-lanes=')
+FLAG_RE = re.compile(r'-[A-Za-z]|--[A-Za-z][\w-]*(=.*)?', re.S)
+
+
+def flag_error(verb, args):
+    """Why these arguments are refused, or None."""
+    known = FLAGS.get(verb, ()) + GLOBAL_FLAGS
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a + '=' in known:
+            if i + 1 >= len(args):
+                return f'{a} needs a value'
+            i += 1
+        elif FLAG_RE.fullmatch(a) and a not in known:
+            return f'unknown flag {a}'
+        i += 1
+    return None
+
+
+def verb_at(args):
+    """Where the verb is: after the global flags."""
+    i = 0
+    while i < len(args) and args[i].startswith('-'):
+        i += 2 if args[i] + '=' in GLOBAL_FLAGS else 1
+    return i
+
+
+# Verbs whose words are free text, and how many of them come before the text.
+FREE_TEXT = {'ask': 0, 'answer': 1}
+
+
+def text_at(verb, args, at):
+    """Where a verb's free text begins; the end for a verb without one."""
+    if verb not in FREE_TEXT:
+        return len(args)
+    before, i = FREE_TEXT[verb], at + 1
+    while i < len(args):
+        if args[i] + '=' in FLAGS.get(verb, ()) + GLOBAL_FLAGS:
+            i += 2
+            continue
+        if not FLAG_RE.fullmatch(args[i]):
+            if before == 0:
+                return i
+            before -= 1
+        i += 1
+    return len(args)
+
+
+def verb_help(verb):
+    """The lines of the usage text for one verb."""
+    out, on = [], False
+    for ln in __doc__.splitlines():
+        if ln.startswith('    python coord.py '):
+            on = ln.split()[2] == verb
+        elif not ln.startswith('     '):
+            on = False
+        if on:
+            out.append(ln)
+    return '\n'.join(out) or __doc__
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in ('-h', '--help', 'help'):
         print(__doc__)
         return 0
+    at = verb_at(args)
+    verb = args[at] if at < len(args) else ''
+    end = text_at(verb, args, at)
+    if '-h' in args[:end] or '--help' in args[:end]:  # before anything is read or written
+        print(verb_help(verb))
+        return 0
+    # a free text's own words are never flags, but the verb's documented ones may follow it
+    bad = flag_error(verb, args[:end])
+    if bad:
+        print(f'coordinator: {bad} (--help lists the flags)', file=sys.stderr)
+        return 2
     flags = {}
+    text = args[end:]
+    del args[end:]
     for k in ('backend', 'repos', 'workerModel', 'maxLanes'):
         v = take(args, '--' + re.sub(r'(?<!^)(?=[A-Z])', '-', k).lower())
         if v:
             flags[k] = v
-    cfg = Config(project_root(), flags)
+    args += text
+    if not args:
+        print(__doc__)
+        return 2
     verb = args.pop(0)
+    if verb not in VERBS and verb != 'config':
+        print(f'coordinator: unknown verb {verb!r}\n' + __doc__, file=sys.stderr)
+        return 2
+    try:
+        cfg = Config(find_project(init=verb == 'init'), flags)
+    except project.Refused as ex:
+        if verb == 'context':  # the plugin's session start: it shows why and stays out of the way
+            print(json.dumps({'configured': False, 'refused': str(ex)}))
+            return 0
+        print(ex, file=sys.stderr)
+        return 2
     if verb == 'config':
         print(json.dumps({k: cfg[k] for k in DEFAULTS}, indent=1))
         return 0
-    if verb not in VERBS:
-        print(f'coordinator: unknown verb {verb!r}\n' + __doc__, file=sys.stderr)
-        return 2
     return VERBS[verb](cfg, args)
 
 

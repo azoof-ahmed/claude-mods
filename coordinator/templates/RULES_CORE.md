@@ -15,6 +15,8 @@ Every worker reads this file at startup. Keep it under 100 lines. Rules that no 
 - **Long docs:** open by section only.
   - With the code-index plugin, use its `md_toc` and the code index.
   - Otherwise, `rg -n "^#" <file>` and read the range you need.
+- **Paths** in these files are from the coordinator's project. Working in another folder (a worktree, another
+  repository), use the absolute paths from your first prompt and session context, never a copy in your own folder.
 - **Startup reading:** the startup list in {{briefs}}/RESUME.md is the whole list. Read anything else only when a task needs it.
 
 ## 3. Shared tree and git

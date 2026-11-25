@@ -39,7 +39,7 @@ Every mod reads its settings in this order, first match wins:
 3. the plugin options (`/config`, or `pluginConfigs["<mod>"].options` in settings), which reach the CLIs as environment variables;
 4. the defaults.
 
-So your plugin options are your defaults everywhere, and a repo can override them for everyone working in it.
+So your plugin options are your defaults everywhere, and a repo can override them for everyone working in it. Paths (bus, cards, tracker and the like) are set per project only: one that comes from an option or the environment is refused when it points outside the project.
 
 ## Develop
 

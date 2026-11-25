@@ -102,7 +102,6 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `repos` | `.` | Comma-separated repo paths workers start in. The first is the default. |
 | `backend` | `manual` | `manual`, `auto`, `orca`, `herdr`, `tmux` or `wt` (see Backends). |
 | `shell` | `auto` | How `AGENT_BUS_ROLE` is set before the command: `auto` (PowerShell on Windows, POSIX elsewhere), `posix`, `powershell` or `cmd`. |
 | `workerCommand` | `claude --model {model} "{prompt}"` | The worker command template. |
@@ -116,15 +115,23 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
 | `probeCommand` | `claude --model haiku` | The throwaway session the watcher opens to read `/usage`. |
 | `pauseReminderMin` | `10` | Minutes before a silent lane gets one reminder. |
 | `pauseGraceMin` | `20` | Minutes before a silent lane is interrupted and its terminal closed. |
+| `minFreeRamGb` | `4` | `preflight` answers WAIT below this. |
+| `minBattery` | `40` | `preflight` answers WAIT below this when not charging. |
+| `python` | `python` | The interpreter for the CLI. |
+
+### Paths
+
+Paths belong to one project, so they are not plugin options: set `repos`, `busDir`, `trackerDb`, `rulesFile`, `briefsDir`, `cardsDir`, `reportsDir` in the `"coordinator"` section of the project's `.claude/claude-mods.json`. A path that still comes from an old option or the environment (`COORD_BUS_DIR` and so on) is used with a warning when it is inside the project or its main checkout, and refused when it is outside; the next version stops reading it. A git worktree without its own section uses its main checkout's file and state. A worker started by `coord spawn` uses its coordinator's project, named by `COORD_LANE`, whatever its folder holds, as long as that project uses this plugin; this applies in that project's repository and worktrees, in the repository its lane was started in and in the project's `repos`, nowhere else. `init` lists the files it writes and refuses when any is outside the project. `-h` or `--help` after any verb only prints help, and an unknown flag is an error; inside free text both are words of it.
+
+| Key | Default | What it is |
+| --- | --- | --- |
+| `repos` | `.` | Comma-separated repo paths workers start in. The first is the default. |
 | `busDir` | `.claude/bus` | The agent-bus directory. |
 | `trackerDb` | `.claude/tasks/tasks.db` | The task-tracker db, read-only, for lane tasks. |
 | `rulesFile` | `.claude/coord/RULES_CORE.md` | The rules core. |
 | `briefsDir` | `.claude/coord/briefs` | Briefs, the resume brief, the scheduler brief and the handoff protocol. |
 | `cardsDir` | `.claude/coord/lanes` | Lane cards and `lanes.json`. |
 | `reportsDir` | `.claude/coord/reports` | Progress logs, the question queue, and the message fallback without the bus. |
-| `minFreeRamGb` | `4` | `preflight` answers WAIT below this. |
-| `minBattery` | `40` | `preflight` answers WAIT below this when not charging. |
-| `python` | `python` | The interpreter for the CLI. |
 
 ## What the hooks do
 

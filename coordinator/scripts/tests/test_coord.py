@@ -16,7 +16,7 @@ import coord  # noqa: E402
 REAL_HERDR_PANES = coord.herdr_panes
 
 CLEAN = {coord.env_key(k): '' for k in coord.DEFAULTS}
-CLEAN.update({'AGENT_BUS_ROLE': '', 'AGENT_BUS_CLI': os.devnull + '-missing',
+CLEAN.update({'AGENT_BUS_ROLE': '', 'COORD_LANE': '', 'CLAUDE_CONFIG_DIR': os.devnull, 'AGENT_BUS_CLI': os.devnull + '-missing',
               # the tests run inside Orca, herdr or tmux: none of that may leak into `auto`
               'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
 
@@ -82,6 +82,29 @@ class CoordTest(unittest.TestCase):
         (self.root / '.claude/claude-mods.json').unlink()
         with mock.patch.dict(os.environ, {'COORD_MAX_LANES': '9'}):
             self.assertEqual(coord.Config(self.root)['maxLanes'], 9)
+
+    def test_spawn_records_the_lane_before_the_terminal_opens_and_undoes_it(self):
+        self.run_cli('init')
+        seen = []
+
+        def opening(cfg, role, *args, **kw):
+            seen.append(coord.load_lanes(cfg)[role])
+            return None, 'manual'
+        with mock.patch.object(coord, 'open_terminal', opening):
+            self.assertEqual(self.run_cli('spawn', 'w')[0], 0)
+        self.assertEqual((seen[0]['state'], os.path.realpath(seen[0]['repo'])), ('live', os.path.realpath(self.root)))
+
+        def failing(*args, **kw):
+            raise SystemExit('no terminal')
+        cfg = coord.Config(self.root)
+        with mock.patch.object(coord, 'open_terminal', failing):
+            self.assertNotEqual(self.run_cli('spawn', 'x')[0], 0)
+            self.assertNotIn('x', coord.load_lanes(cfg))
+            lanes = coord.load_lanes(cfg)
+            lanes['w']['state'] = 'closed'
+            coord.save_lanes(cfg, lanes)
+            self.assertNotEqual(self.run_cli('spawn', 'w')[0], 0)
+        self.assertEqual(coord.load_lanes(cfg), lanes)
 
     def test_spawn_manual_records_the_lane_and_prints_the_command(self):
         self.run_cli('init')
