@@ -163,7 +163,8 @@ def load_config(flags=None, root=None, init=False, start=None):
             cfg[k] = v
             from_env.discard(k)
     if 'dir' in from_env:
-        proj.check_env('agent-bus', 'agent-bus', 'busDir', ENV['dir'], cfg['dir'], DEFAULTS['dir'])
+        proj.check_env('agent-bus', 'agent-bus', 'busDir', ENV['dir'], cfg['dir'], DEFAULTS['dir'],
+                       '--dir')
     if 'tasksDb' in from_env:
         try:
             proj.check_env('agent-bus', 'agent-bus', 'tasksDb', ENV['tasksDb'], cfg['tasksDb'], '')
@@ -968,6 +969,29 @@ def flag_error(verb, args):
     return None
 
 
+# Verbs with free text, how many words come before it, and their flags that take a value.
+FREE_TEXT = {'broadcast': (0, ('--to', '--prio', '--from')),
+             'send': (1, ('--from', '--re', '--cc', '--prio', '--topic', '--body-file', '--dir')),
+             'edit': (1, ('--as',))}
+
+
+def text_at(verb, argv):
+    """Where a verb's free text begins (or a `--`); the end for a verb without one."""
+    if verb not in FREE_TEXT:
+        return len(argv)
+    (before, values), i = FREE_TEXT[verb], 1
+    while i < len(argv) and argv[i] != '--':
+        if argv[i] in values:
+            i += 2
+            continue
+        if not FLAG_RE.fullmatch(argv[i]):
+            if before == 0:
+                return i
+            before -= 1
+        i += 1
+    return min(i, len(argv))
+
+
 def verb_help(verb):
     """Help for one verb: the lines of the usage text, or orca-bus's own."""
     out, on = [], False
@@ -989,22 +1013,34 @@ def main(argv=None):
         print('agent-bus: --dir needs a value', file=sys.stderr)
         return 2
     flags = {'dir': take(argv, '--dir')}
-    if not argv or '-h' in argv or '--help' in argv:  # before anything is read or written
-        print(verb_help(argv[0]) if argv and not argv[0].startswith('-') else __doc__)
+    if not argv or argv[0] in ('-h', '--help'):
+        print(__doc__)
         return 0
     verb = argv[0]
-    bad = f'unknown flag {verb}' if FLAG_RE.fullmatch(verb) else flag_error(verb, argv[1:])
+    end = text_at(verb, argv)
+    if '-h' in argv[:end] or '--help' in argv[:end]:  # before anything is read or written
+        print(verb_help(verb))
+        return 0
+    if verb in ('send', 'edit') and '--' not in argv and ('-h' in argv[end:] or '--help' in argv[end:]):
+        # orca-bus's parser would take it for its own help and drop the message
+        print('agent-bus: nothing was sent: quote the text as one argument, or put -- before it', file=sys.stderr)
+        return 2
+    refused = None
+    bad = f'unknown flag {verb}' if FLAG_RE.fullmatch(verb) else flag_error(verb, argv[1:end])
     if bad:
         print(f'agent-bus: {bad} (--help lists the flags)', file=sys.stderr)
         return 2
     try:
         cfg = load_config(flags, init=verb == 'init')
     except project.Refused as ex:
-        if verb == 'hook':  # the plugin's hooks: it shows why and stays out of the way
-            print(json.dumps({'bus': False, 'role': env_role(), 'text': None, 'refused': str(ex)}))
-            return 0
-        print(ex, file=sys.stderr)
-        return 2
+        if verb not in ('hook', 'broadcast', 'global'):
+            print(ex, file=sys.stderr)
+            return 2
+        # no project bus here, but the machine-wide channel does not depend on it
+        refused = str(ex)
+        cfg = load_config({**flags, 'dir': os.devnull})
+        if verb != 'hook':
+            print(refused, file=sys.stderr)
     if verb == 'snapshot':
         import_orca_bus(cfg)
         for stream in (sys.stdout,):
@@ -1021,8 +1057,10 @@ def main(argv=None):
         # No bus in this project: stay out of the way, except for the machine-wide global channel.
         take(argv, '--event')
         role = take(argv, '--as') or env_role()
-        out = {'bus': False, 'dir': cfg['dir'], 'role': role,
+        out = {'bus': False, 'dir': None if refused else cfg['dir'], 'role': role,
                'text': global_hook_text(cfg, role, take(argv, '--session'))}
+        if refused:
+            out['refused'] = refused
         if cfg['global']:
             out['globalLog'] = str(Path(cfg['globalDir'], 'global.jsonl').as_posix())
         print(json.dumps(out))

@@ -12,7 +12,7 @@ sys.path.insert(1, str(HERE.parent / 'vendor'))
 
 def run():
     p = argparse.ArgumentParser(prog='bus-tui', description=__doc__)
-    p.add_argument('--dir', help='bus directory (default: the project's, as bus.py finds it)')
+    p.add_argument('--dir', help='bus directory (default: the bus of this project, as bus.py finds it)')
     p.add_argument('--as', dest='role', help='your role (default: $AGENT_BUS_ROLE, else user)')
     p.add_argument('--theme', help='tokyonight (default), catppuccin or claude')
     a = p.parse_args()

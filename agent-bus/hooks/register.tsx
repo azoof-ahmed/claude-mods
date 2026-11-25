@@ -6,7 +6,7 @@ import type { BusMessage, BusMode, BusSnapshot } from '../types'
 /** What `bus.py hook` prints. */
 type HookOut = {
   bus: boolean
-  dir?: string
+  dir?: string | null
   role?: string | null
   text?: string | null
   watch?: boolean
