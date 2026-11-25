@@ -1,0 +1,206 @@
+"""The project a command works on: worktrees, two projects, paths from the environment, help and unknown flags."""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SCRIPTS))
+import bus  # noqa: E402
+import project  # noqa: E402
+
+SECTION, STATE = 'agent-bus', Path('.claude') / 'bus'
+
+
+def tree(root):
+    """Every file outside .git with its content, to show that nothing changed."""
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob('*'))
+            if p.is_file() and '.git' not in p.relative_to(root).parts}
+
+
+class Places(unittest.TestCase):
+    """Two made-up projects in one folder, a home folder beside them, and a worktree of the first project."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.top = Path(tmp.name).resolve()
+        self.home = self.top / 'home'
+        self.alpha, self.beta = self.home / 'alpha', self.home / 'beta'
+        (self.home / '.claude').mkdir(parents=True)
+        self.env = {'HOME': str(self.home), 'USERPROFILE': str(self.home), 'PATH': os.environ.get('PATH', ''),
+                    'GIT_CONFIG_NOSYSTEM': '1'}
+        for p in (self.alpha, self.beta):
+            p.mkdir()
+            self.git(p, 'init', '-q')
+            self.git(p, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty',
+                     '-m', 'first')
+        self.lane = self.home / 'alpha-lane'
+        self.git(self.alpha, 'worktree', 'add', '-q', str(self.lane))
+
+    def git(self, cwd, *args):
+        subprocess.run(['git', *args], cwd=cwd, env=self.env, check=True, capture_output=True)
+
+    def section(self, root, name, **keys):
+        (root / '.claude').mkdir(exist_ok=True)
+        (root / '.claude' / 'claude-mods.json').write_text(json.dumps({name: keys}), encoding='utf-8')
+
+    def cli(self, cwd, *args, **env):
+        r = subprocess.run([sys.executable, str(SCRIPTS / 'bus.py'), *args], cwd=cwd, env={**self.env, **env},
+                           capture_output=True, text=True, encoding='utf-8', stdin=subprocess.DEVNULL)
+        return r.returncode, r.stdout, r.stderr
+
+    def unchanged(self, cwd, *args, **env):
+        before = tree(self.top)
+        got = self.cli(cwd, *args, **env)
+        self.assertEqual(tree(self.top), before, args)
+        return got
+
+class ProjectTest(Places):
+    """project.py itself."""
+
+    def test_home_is_not_a_project(self):
+        (self.home / 'loose').mkdir()
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(project.find_root(self.home / 'loose'), self.home / 'loose')
+            self.assertFalse(project.Project(self.home).holds(str(self.beta / 'x')))
+            self.assertTrue(project.Project(self.home).holds('x'))
+
+    def test_the_main_checkout_is_what_git_says(self):
+        r = subprocess.run(['git', 'rev-parse', '--git-common-dir'], cwd=self.lane, env=self.env, check=True,
+                           capture_output=True, text=True)
+        self.assertEqual(project.main_checkout(self.lane), (self.lane / r.stdout.strip()).resolve().parent)
+        self.assertIsNone(project.main_checkout(self.alpha))
+
+    def test_a_bare_repository_has_no_main_checkout(self):
+        self.git(self.home, 'clone', '-q', '--bare', str(self.alpha), 'bare.git')
+        self.git(self.home / 'bare.git', 'worktree', 'add', '-q', str(self.home / 'w'), 'HEAD', '--detach')
+        self.assertIsNone(project.main_checkout(self.home / 'w'))
+
+    def test_paths_outside_do_not_belong(self):
+        (self.alpha / 'out').symlink_to(self.beta)
+        p = project.Project(self.alpha)
+        for v in ('../beta/x', str(self.beta), str(self.home / 'alpha2'), 'out/x', '~/beta'):
+            self.assertFalse(p.holds(v), v)
+        for v in ('x', './a/../b', str(self.alpha / 'x')):
+            self.assertTrue(p.holds(v), v)
+
+    def test_a_worktree_keeps_its_own_section_or_state(self):
+        with mock.patch.dict(os.environ, self.env):
+            def root():
+                return project.resolve(SECTION, STATE, self.lane).root
+            (self.lane / STATE).mkdir(parents=True)
+            self.assertEqual(root(), self.lane)
+            self.section(self.alpha, SECTION)
+            self.assertEqual(root(), self.alpha)
+            self.section(self.lane, SECTION)
+            self.assertEqual(root(), self.lane)
+
+    def test_the_hand_over_names_a_project(self):
+        lane = {'COORD_LANE': f'{self.alpha.as_posix()}#w'}
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane).root, self.alpha)
+            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane, init=True).root, self.beta)
+            for bad in ('', 'w', '#w', f'{self.home.as_posix()}/none#w', f'{self.home.as_posix()}#w'):
+                self.assertEqual(project.resolve(SECTION, STATE, self.beta, {'COORD_LANE': bad}).root, self.beta, bad)
+            self.section(self.beta, SECTION)
+            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane).root, self.beta)
+
+
+class BusPathsTest(Places):
+    def cli(self, cwd, *args, **env):
+        return super().cli(cwd, *args, **{'AGENT_BUS_PIFORGE_SYNC': 'off', 'AGENT_BUS_PAUSE_PIFORGE': 'off', **env})
+
+    def hook(self, cwd, **env):
+        code, out, err = self.cli(cwd, 'hook', '--event', 'SessionStart', AGENT_BUS_GLOBAL='off', **env)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_help_after_every_verb_changes_nothing(self):
+        for verb in ('init', 'send', 'digest', 'read', 'watch', 'watch-live', 'whoami', 'hook', 'deliver', 'chat', 'tui',
+                     'snapshot', 'broadcast', 'global', 'register', 'who', 'status', 'ack', 'edit', 'delete'):
+            for flag in ('-h', '--help'):
+                code, out, _ = self.unchanged(self.alpha, verb, flag, AGENT_BUS_DIR=str(self.beta / 'bus'))
+                self.assertEqual(code, 0, verb)
+                self.assertIn('bus.py', out)
+        self.assertEqual(self.unchanged(self.alpha, 'broadcast', 'stop', '--help')[0], 0)
+
+    def test_unknown_flags_are_errors(self):
+        self.assertEqual(self.cli(self.alpha, 'init')[0], 0)
+        for args in (['init', '--rolls', 'a'], ['broadcast', 'x', '--urgent'], ['watch', '--as', 'a', '--x'],
+                     ['hook', '--event'], ['send', 'coordinator', 'x', '--from', 'a', '--nope'], ['--nope', 'who'],
+                     ['deliver', '--nope'], ['digest', '--as', 'a', '-x']):
+            code, _, err = self.unchanged(self.alpha, *args)
+            self.assertEqual(code, 2, args)
+            self.assertTrue(err)
+
+    def test_environment_paths_outside_the_project_are_refused(self):
+        self.cli(self.alpha, 'init')
+        for value in (str(self.alpha / '.claude' / 'bus'), '../alpha/.claude/bus'):
+            for args in (['init', '--roles', 'x'], ['send', 'coordinator', 'hi', '--from', 'x'], ['who']):
+                code, _, err = self.unchanged(self.beta, *args, AGENT_BUS_DIR=value)
+                self.assertEqual(code, 2, args)
+                for part in ('busDir', 'AGENT_BUS_DIR', str(self.beta / '.claude' / 'claude-mods.json')):
+                    self.assertIn(part, err)
+
+    def test_the_hook_says_why_and_leaves_the_bus_alone(self):
+        self.cli(self.alpha, 'init')
+        before = tree(self.top)
+        out = self.hook(self.beta, AGENT_BUS_DIR=str(self.alpha / '.claude' / 'bus'), AGENT_BUS_ROLE='coordinator')
+        self.assertEqual((out['bus'], tree(self.top)), (False, before))
+        self.assertIn('busDir', out['refused'])
+
+    def test_a_tasks_db_outside_is_ignored_with_a_message(self):
+        self.cli(self.beta, 'init')
+        code, _, err = self.cli(self.beta, 'whoami', '--as', 'x', AGENT_BUS_TASKS_DB=str(self.alpha / 't.db'))
+        self.assertEqual(code, 0)
+        self.assertIn('refusing tasksDb', err)
+
+    def test_environment_paths_inside_still_work_with_a_warning(self):
+        code, out, err = self.cli(self.beta, 'init', AGENT_BUS_DIR='tmp/bus')
+        self.assertEqual(code, 0)
+        self.assertIn(f'init writes: {self.beta / "tmp" / "bus"}', out)
+        self.assertIn('busDir comes from a plugin option', err)
+
+    def test_init_refuses_a_folder_outside(self):
+        for args in (['--dir', str(self.alpha / 'bus'), 'init'], ['init', '--dir', '../alpha/bus']):
+            self.assertEqual(self.unchanged(self.beta, *args)[0], 2)
+        self.section(self.beta, 'agent-bus', busDir=str(self.alpha / 'bus'))
+        self.assertEqual(self.unchanged(self.beta, 'init')[0], 2)
+
+    def test_a_worktree_uses_the_main_checkouts_bus(self):
+        self.section(self.alpha, 'agent-bus', busDir='tmp/bus')
+        self.cli(self.alpha, 'init', '--roles', 'coordinator,w')
+        self.assertEqual(self.cli(self.lane, 'send', 'coordinator', 'hello', '--from', 'w')[0], 0)
+        self.assertIn('hello', self.cli(self.alpha, 'digest', '--as', 'coordinator')[1])
+        self.assertTrue(self.hook(self.lane, AGENT_BUS_ROLE='w')['bus'])
+        self.assertFalse((self.lane / 'tmp').exists())
+
+    def test_a_worktree_finds_a_bus_made_without_a_section(self):
+        self.cli(self.alpha, 'init')
+        self.assertTrue(self.hook(self.lane, AGENT_BUS_ROLE='w')['bus'])
+
+    def test_a_worker_in_another_repository_uses_its_coordinators_bus(self):
+        self.cli(self.alpha, 'init', '--roles', 'coordinator,w')
+        lane = f'{self.alpha.as_posix()}#w'
+        self.assertFalse(self.hook(self.beta, AGENT_BUS_ROLE='w')['bus'])
+        self.assertTrue(self.hook(self.beta, AGENT_BUS_ROLE='w', COORD_LANE=lane)['bus'])
+        before = tree(self.alpha)
+        self.assertEqual(self.cli(self.beta, 'init', COORD_LANE=lane)[0], 0)  # its own, not the coordinator's
+        self.assertEqual(tree(self.alpha), before)
+        self.assertTrue((self.beta / '.claude' / 'bus').is_dir())
+
+    def test_lanes_are_read_only_from_this_project(self):
+        (self.alpha / 'cards').mkdir()
+        (self.alpha / 'cards' / 'lanes.json').write_text('{"w": {"state": "live"}}')
+        with mock.patch.dict(os.environ, {**self.env, 'COORD_CARDS_DIR': str(self.alpha / 'cards')}):
+            self.assertIsNone(bus.coord_lanes(self.beta))
+            self.assertIn('w', bus.coord_lanes(self.alpha))
+
+
+if __name__ == '__main__':
+    unittest.main()

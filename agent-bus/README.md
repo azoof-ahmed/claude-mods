@@ -195,8 +195,7 @@ agent-bus/tui/bus-tui          # directly in a terminal; on Windows: agent-bus\t
 bus-tui --as coordinator --theme claude --dir path/to/bus
 ```
 
-- Bus directory: `--dir`, else `$AGENT_BUS_DIR`, else `.claude/bus` under the nearest ancestor that holds `.git`
-  or `.claude`.
+- Bus directory: `--dir`, else the project's bus, found as `bus.py` finds it.
 - Role: `--as`, else `$AGENT_BUS_ROLE`, else `user` (registered on first use, the same way the web chat does).
 - Needs Textual (`pip install textual`). Without it the launcher prints that hint and exits with status 2.
 
@@ -304,7 +303,6 @@ Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `busDir` | `.claude/bus` | The bus directory, relative to the project root. |
 | `role` | (empty) | The session's role when `AGENT_BUS_ROLE` and `ORCA_BUS_NAME` are unset and the terminal is not registered. |
 | `roles` | `coordinator` | The roles `init` registers. |
 | `orcaBusPath` | (empty) | A checkout of orca-bus to use instead of the vendored copy. |
@@ -314,7 +312,6 @@ Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`
 | `monitor` | `on` | `off` stops the "arm a Monitor" requests. |
 | `chatPort` | `8790` | The web chat port. |
 | `chatBind` | `127.0.0.1` | `127.0.0.1`, `localhost` or `::1`. Loopback only. |
-| `tasksDb` | (empty) | A task-tracker db for the chat's lane list. |
 | `taskPrefix` | `TASK` | Task ids with this prefix (`TASK-12`) become task chips in the chat. |
 | `band` | `on` | `off` hides the unread band above the prompt. |
 | `theme` | `tokyonight` | The `/bus` pane's colors: `tokyonight` or `claude`. |
@@ -326,6 +323,15 @@ Set them in `/config`, or in settings under `pluginConfigs["agent-bus"].options`
 | `piforgeBin` | `piforge` | The piforge command that runs. |
 | `piforgeSync` | `auto` | `on`: a frozen piforge queue pauses every session (global pause with its reason), and its thaw resumes them. `auto`: when piforge is on PATH. `off`: never. |
 | `piforgeSyncInterval` | `60` | Seconds between `piforge queue --json` checks, shared by every session on the machine. |
+
+### Paths
+
+Paths belong to one project, so they are not plugin options: set `busDir`, `tasksDb` in the `"agent-bus"` section of the project's `.claude/claude-mods.json`. A path that still comes from an old option or the environment (`AGENT_BUS_DIR`, `AGENT_BUS_TASKS_DB`) is used with a warning when it is inside the project or its main checkout, and refused when it is outside; the next version stops reading it. A git worktree without its own section uses its main checkout's file and state. A worker started by `coord spawn` uses its coordinator's project, named by `COORD_LANE`, unless the repository it is in has its own. `init` lists the files it writes and refuses when any is outside the project. `-h` or `--help` after any verb only prints help, and an unknown flag is an error.
+
+| Key | Default | What it is |
+| --- | --- | --- |
+| `busDir` | `.claude/bus` | The bus directory, relative to the project root. |
+| `tasksDb` | (empty) | A task-tracker db for the chat's lane list. |
 
 The bus's `config.json` holds `reply_cmd`, the command printed in every reply hint, nudge and watch line. `init` writes this CLI's own (the `python` option resolved to a full path, else the interpreter running it, and the versioned script path), and each session's start and stop hooks replace it when its python or script is missing or it names an older plugin version.
 

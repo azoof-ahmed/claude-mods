@@ -22,6 +22,9 @@
 Configuration (first match wins): flags > <project>/.claude/claude-mods.json "agent-bus" > environment
 (the plugin's options arrive as environment variables) > defaults.
     --dir / AGENT_BUS_DIR            bus directory (default .claude/bus under the project root)
+                                     (the environment may not point it, or AGENT_BUS_TASKS_DB, outside the project; a
+                                     git worktree without its own section uses its main checkout's bus; a worker uses
+                                     its coordinator's project, which COORD_LANE names)
     AGENT_BUS_ROLE                   this session's role (also ORCA_BUS_NAME, or the registry entry for the
                                      terminal handle: ORCA_TERMINAL_HANDLE, or HERDR_PANE_ID inside herdr)
     AGENT_BUS_ORCA_BUS_PATH          a checkout of orca-bus to import from (else the installed package)
@@ -44,6 +47,7 @@ Configuration (first match wins): flags > <project>/.claude/claude-mods.json "ag
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -52,6 +56,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import global_bus  # noqa: E402
+import project  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 WATCH_BEAT_S = 30       # the watch writes its heartbeat this often
@@ -106,12 +111,8 @@ def term_handle(env=None):
     return env.get('ORCA_TERMINAL_HANDLE') or None
 
 
-def project_root(start=None):
-    here = Path(start or os.getcwd()).resolve()
-    for d in [here, *here.parents]:
-        if (d / '.git').exists() or (d / '.claude').is_dir():
-            return d
-    return here
+def find_project(start=None, init=False):
+    return project.resolve('agent-bus', Path(DEFAULTS['dir']), start, init=init)
 
 
 # The project file's "agent-bus" keys are the documented option names (README, plugin.json). `busDir` is the bus
@@ -138,21 +139,35 @@ def project_keys(section, path):
     return out
 
 
-def load_config(flags=None, root=None):
-    root = root or project_root()
+def load_config(flags=None, root=None, init=False, start=None):
+    proj = project.Project(root) if root else find_project(start, init)
+    root = proj.root
     cfg = dict(DEFAULTS)
+    from_env = set()
     for k, var in ENV.items():
         if os.environ.get(var):
             cfg[k] = os.environ[var]
-    p = root / '.claude' / 'claude-mods.json'
+            from_env.add(k)
+    p = proj.file
     if p.exists():  # the project's own file beats the environment (the plugin's options arrive as env)
         try:
-            cfg.update(project_keys(json.loads(p.read_text(encoding='utf-8')).get('agent-bus') or {}, p))
+            section = project_keys(json.loads(p.read_text(encoding='utf-8')).get('agent-bus') or {}, p)
+            cfg.update(section)
+            from_env -= set(section)
         except (ValueError, OSError, AttributeError) as ex:
             print(f'agent-bus: ignoring {p}: {ex}', file=sys.stderr)
     for k, v in (flags or {}).items():
         if v not in (None, ''):
             cfg[k] = v
+            from_env.discard(k)
+    if 'dir' in from_env:
+        proj.check_env('agent-bus', 'agent-bus', 'busDir', ENV['dir'], cfg['dir'], DEFAULTS['dir'])
+    if 'tasksDb' in from_env:
+        try:
+            proj.check_env('agent-bus', 'agent-bus', 'tasksDb', ENV['tasksDb'], cfg['tasksDb'], '')
+        except project.Refused as ex:  # the chat only lists its tasks: the bus works without it
+            print(ex, file=sys.stderr)
+            cfg['tasksDb'] = ''
     d = Path(cfg['dir'])
     cfg['dir'] = str(d if d.is_absolute() else root / d)
     cfg['nudgeAfter'] = float(cfg['nudgeAfter'])
@@ -167,6 +182,7 @@ def load_config(flags=None, root=None):
     cfg['piforgeSyncInterval'] = float(cfg['piforgeSyncInterval'])
     cfg['project'] = root.name
     cfg['root'] = str(root)
+    cfg['proj'] = proj
     return cfg
 
 
@@ -696,6 +712,8 @@ def coord_lanes(root):
     like coord.py's: <project>/.claude/claude-mods.json "coordinator" > COORD_CARDS_DIR > .claude/coord/lanes."""
     root = Path(root)
     cards = os.environ.get('COORD_CARDS_DIR') or '.claude/coord/lanes'
+    if not project.Project(root).holds(cards):
+        cards = '.claude/coord/lanes'
     try:
         section = json.loads((root / '.claude' / 'claude-mods.json').read_text(encoding='utf-8')).get('coordinator')
         if isinstance(section, dict) and section.get('cardsDir'):
@@ -920,14 +938,71 @@ def take(argv, flag):
     return None
 
 
+# What this CLI's own verbs take: flags alone, and flags with a value. Anything else that looks like a flag is an
+# error. The other verbs are orca-bus's, whose parser checks them before it does anything.
+FLAGS = {
+    'init': ('--roles=',), 'snapshot': ('--since=', '--as=', '--limit=', '--body='), 'global': ('--n=',),
+    'broadcast': ('--status', '--pause', '--resume', '--no-piforge', '--to=', '--prio=', '--from='),
+    'hook': ('--event=', '--as=', '--session='), 'whoami': ('--as=',), 'watch-live': ('--as=',),
+    'watch': ('--as=', '--for=', '--fyi', '--poll='), 'chat': ('--port=', '--bind=', '--detach', '--stop', '--status'),
+    'tui': ('--open', '--as=', '--theme='),
+}
+FLAG_RE = re.compile(r'-[A-Za-z]|--[A-Za-z][\w-]*(=.*)?', re.S)
+
+
+def flag_error(verb, args):
+    """Why these arguments are refused, or None."""
+    known = FLAGS.get(verb)
+    i = 0
+    while known is not None and i < len(args):
+        a = args[i]
+        if a + '=' in known:
+            if i + 1 >= len(args):
+                return f'{a} needs a value'
+            i += 1
+        elif FLAG_RE.fullmatch(a) and a not in known:
+            return f'unknown flag {a}'
+        i += 1
+    return None
+
+
+def verb_help(verb):
+    """Help for one verb: the lines of the usage text, or orca-bus's own."""
+    out, on = [], False
+    for ln in __doc__.splitlines():
+        if ln.startswith('    python bus.py '):
+            on = ln.split()[2] == verb
+        elif not ln.startswith('     '):
+            on = False
+        if on:
+            out.append(ln)
+    if out:
+        return '\n'.join(out)
+    return __doc__
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ['--dir'] and len(argv) < 2:
+        print('agent-bus: --dir needs a value', file=sys.stderr)
+        return 2
     flags = {'dir': take(argv, '--dir')}
-    cfg = load_config(flags)
-    if not argv or argv[0] in ('-h', '--help'):
-        print(__doc__)
+    if not argv or '-h' in argv or '--help' in argv:  # before anything is read or written
+        print(verb_help(argv[0]) if argv and not argv[0].startswith('-') else __doc__)
         return 0
     verb = argv[0]
+    bad = f'unknown flag {verb}' if FLAG_RE.fullmatch(verb) else flag_error(verb, argv[1:])
+    if bad:
+        print(f'agent-bus: {bad} (--help lists the flags)', file=sys.stderr)
+        return 2
+    try:
+        cfg = load_config(flags, init=verb == 'init')
+    except project.Refused as ex:
+        if verb == 'hook':  # the plugin's hooks: it shows why and stays out of the way
+            print(json.dumps({'bus': False, 'role': env_role(), 'text': None, 'refused': str(ex)}))
+            return 0
+        print(ex, file=sys.stderr)
+        return 2
     if verb == 'snapshot':
         import_orca_bus(cfg)
         for stream in (sys.stdout,):
@@ -957,6 +1032,12 @@ def main(argv=None):
 
     if verb == 'init':
         roles = take(argv, '--roles') or cfg['roles']
+        try:
+            cfg['proj'].refuse_outside('agent-bus', [root])
+        except project.Refused as ex:
+            print(ex, file=sys.stderr)
+            return 2
+        print(f'agent-bus init writes: {root} (config.json, registry.json, inbox/, log.jsonl)', flush=True)
         bus = Bus(root)
         p = Path(root) / 'config.json'
         conf = bus.config()

@@ -1,6 +1,6 @@
 {
   "name": "agent-bus",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "A message bus between agent sessions: mail is served between tool calls, a Monitor wakes an idle agent, urgent mail can be typed into Orca or herdr terminals, a /bus chat pane, an unread band and a localhost web chat show it all. A machine-wide global channel reaches every session, with a global pause/resume. Built on orca-bus.",
   "author": {
     "name": "Azoof Ahmed"
@@ -8,12 +8,6 @@
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "busDir": {
-      "type": "string",
-      "title": "Bus directory",
-      "description": "Where the bus keeps its inboxes, registry and log. Relative paths are under the project root (the nearest folder with .git or .claude).",
-      "default": ".claude/bus"
-    },
     "role": {
       "type": "string",
       "title": "Default role",
@@ -82,12 +76,6 @@
         "localhost",
         "::1"
       ]
-    },
-    "tasksDb": {
-      "type": "string",
-      "title": "Task tracker database",
-      "description": "Optional: a task-tracker SQLite db whose in-progress tasks the chat shows per role.",
-      "default": ""
     },
     "taskPrefix": {
       "type": "string",

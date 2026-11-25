@@ -16,6 +16,8 @@ type HookOut = {
   cli?: string
   /** The machine-wide global channel's log; its size changing means a broadcast arrived. Absent: channel off. */
   globalLog?: string
+  /** Why bus.py refused a setting (a path outside this project), when it did. */
+  refused?: string
 }
 
 type $T = EngineInterface
@@ -432,7 +434,14 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Every Bash child and every bus.py run inherits these, so the model's own commands
     // and a Monitor's watch use the same configuration as the hooks.
-    await $.env.set('AGENT_BUS_DIR', str(options.busDir, '.claude/bus'))
+    // Paths belong to one project: these two are no longer offered as options, and still passed on for one version.
+    const given: Readonly<Record<string, unknown>> = options
+    for (const [key, name] of [['busDir', 'AGENT_BUS_DIR'], ['tasksDb', 'AGENT_BUS_TASKS_DB']] as const) {
+      const value = str(given[key], '')
+      if (value !== '') {
+        await $.env.set(name, value)
+      }
+    }
     await $.env.set('AGENT_BUS_BACKEND', str(options.backend, 'none'))
     await $.env.set('AGENT_BUS_NUDGE_AFTER', String(options.nudgeAfter ?? 300))
     await $.env.set('AGENT_BUS_CHAT_PORT', String(options.chatPort ?? 8790))
@@ -444,9 +453,6 @@ export const register: Register = (on, options) => {
     await $.env.set('AGENT_BUS_TASK_PREFIX', str(options.taskPrefix, 'TASK'))
     if (str(options.orcaBusPath, '') !== '') {
       await $.env.set('AGENT_BUS_ORCA_BUS_PATH', str(options.orcaBusPath, ''))
-    }
-    if (str(options.tasksDb, '') !== '') {
-      await $.env.set('AGENT_BUS_TASKS_DB', str(options.tasksDb, ''))
     }
     // The global channel's options. An environment value already set wins, so a test or a live proof can point a
     // session at a throwaway global dir without touching the real one.
@@ -750,6 +756,9 @@ export const register: Register = (on, options) => {
     const out = await hook($, python, 'SessionStart', sessionOf(e))
     known = out
     lastGlobalSize = await sizeOf($, out.globalLog)
+    if (out.refused) {
+      $.ui.toast(out.refused)
+    }
     if (!out.bus) {
       // No project bus: only the global channel (a pause in force, or a broadcast) can have something to say.
       return out.text ? { ...result, additionalContext: [...(result.additionalContext ?? []), out.text] } : result
