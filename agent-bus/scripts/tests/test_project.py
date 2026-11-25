@@ -166,6 +166,33 @@ class BusPathsTest(Places):
         self.assertIn(f'init writes: {self.beta / "tmp" / "bus"}', out)
         self.assertIn('busDir comes from a plugin option', err)
 
+    def old_option(self, name, **options):
+        (self.home / '.claude' / 'settings.json').write_text(json.dumps({'pluginConfigs': {name: {'options': options}}}))
+
+    def test_old_options_warn_inside_and_are_refused_outside(self):
+        for name in ('agent-bus', 'agent-bus@claude-mods'):
+            self.old_option(name, busDir='tmp/bus')
+            code, _, err = self.cli(self.beta, 'who')
+            self.assertIn('busDir comes from a plugin option', err)
+            self.assertIn(str(self.beta / 'tmp' / 'bus'), err)
+            self.old_option(name, busDir=str(self.alpha / 'bus'))
+            code, _, err = self.unchanged(self.beta, 'init')
+            self.assertEqual(code, 2)
+            self.assertIn('refusing busDir', err)
+
+    def test_the_terminal_client_finds_the_same_bus(self):
+        def find(cwd, **env):
+            code = 'import sys; sys.path.insert(0, sys.argv[1]); from bus_tui.app import find_bus_dir; print(find_bus_dir())'
+            return subprocess.run([sys.executable, '-c', code, str(SCRIPTS.parent / 'tui')], cwd=cwd,
+                                  env={**self.env, **env}, capture_output=True, text=True, encoding='utf-8')
+        self.section(self.alpha, 'agent-bus', busDir='tmp/bus')
+        for cwd in (self.alpha, self.lane):
+            self.assertEqual(find(cwd).stdout.strip(), str(self.alpha / 'tmp' / 'bus'))
+        self.assertEqual(find(self.beta).stdout.strip(), str(self.beta / '.claude' / 'bus'))
+        r = find(self.beta, AGENT_BUS_DIR=str(self.alpha / 'tmp' / 'bus'))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('refusing busDir', r.stderr)
+
     def test_init_refuses_a_folder_outside(self):
         for args in (['--dir', str(self.alpha / 'bus'), 'init'], ['init', '--dir', '../alpha/bus']):
             self.assertEqual(self.unchanged(self.beta, *args)[0], 2)

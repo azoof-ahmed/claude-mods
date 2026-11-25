@@ -144,9 +144,11 @@ def load_config(flags=None, root=None, init=False, start=None):
     root = proj.root
     cfg = dict(DEFAULTS)
     from_env = set()
+    old = project.old_options('agent-bus', ('busDir', 'tasksDb'))
+    old = {'dir' if k == 'busDir' else k: v for k, v in old.items()}
     for k, var in ENV.items():
-        if os.environ.get(var):
-            cfg[k] = os.environ[var]
+        if os.environ.get(var) or old.get(k):
+            cfg[k] = os.environ.get(var) or old[k]
             from_env.add(k)
     p = proj.file
     if p.exists():  # the project's own file beats the environment (the plugin's options arrive as env)

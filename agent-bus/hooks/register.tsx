@@ -434,14 +434,6 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Every Bash child and every bus.py run inherits these, so the model's own commands
     // and a Monitor's watch use the same configuration as the hooks.
-    // Paths belong to one project: these two are no longer offered as options, and still passed on for one version.
-    const given: Readonly<Record<string, unknown>> = options
-    if (str(given.busDir, '') !== '') {
-      await $.env.set('AGENT_BUS_DIR', str(given.busDir, ''))
-    }
-    if (str(given.tasksDb, '') !== '') {
-      await $.env.set('AGENT_BUS_TASKS_DB', str(given.tasksDb, ''))
-    }
     await $.env.set('AGENT_BUS_BACKEND', str(options.backend, 'none'))
     await $.env.set('AGENT_BUS_NUDGE_AFTER', String(options.nudgeAfter ?? 300))
     await $.env.set('AGENT_BUS_CHAT_PORT', String(options.chatPort ?? 8790))
