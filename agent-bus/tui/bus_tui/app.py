@@ -4,20 +4,14 @@ import sys
 from pathlib import Path
 
 VENDOR = Path(__file__).resolve().parents[2] / 'vendor'
+SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts'
 
 
 def find_bus_dir(start=None):
-    """AGENT_BUS_DIR, else .claude/bus under the nearest ancestor holding .git or .claude (as the plugin does)."""
-    env = os.environ.get('AGENT_BUS_DIR')
-    if env:
-        return Path(env)
-    here = Path(start or os.getcwd()).resolve()
-    root = here
-    for d in [here, *here.parents]:
-        if (d / '.git').exists() or (d / '.claude').is_dir():
-            root = d
-            break
-    return root / '.claude' / 'bus'
+    """The bus of the project `start` is in, found as bus.py finds it."""
+    sys.path.insert(0, str(SCRIPTS))
+    import bus
+    return Path(bus.load_config({}, start=start)['dir'])
 
 
 def main(root, role=None, theme=None) -> int:

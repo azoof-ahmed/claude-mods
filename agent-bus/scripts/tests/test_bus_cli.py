@@ -19,10 +19,11 @@ from orca_bus.store import Bus  # noqa: E402
 
 CLEAN = {k: '' for k in list(bus.ENV.values()) + ['AGENT_BUS_ROLE', 'ORCA_BUS_NAME', 'ORCA_TERMINAL_HANDLE',
                                                    'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'HERDR_ENV',
-                                                   'HERDR_PANE_ID', 'HERDR_WORKSPACE_ID', 'COORD_CARDS_DIR']}
+                                                   'HERDR_PANE_ID', 'HERDR_WORKSPACE_ID', 'COORD_CARDS_DIR', 'COORD_LANE']}
 # Tests never touch the real machine-wide channel: every run gets a throwaway global dir and no piforge.
 _GLOBAL_TMP = tempfile.mkdtemp(prefix='agent-bus-global-test-')
 CLEAN['AGENT_BUS_GLOBAL_DIR'] = str(Path(_GLOBAL_TMP) / 'g')
+CLEAN['CLAUDE_CONFIG_DIR'] = os.devnull
 CLEAN['AGENT_BUS_PAUSE_PIFORGE'] = 'off'
 CLEAN['AGENT_BUS_PIFORGE_SYNC'] = 'off'  # the piforge -> global sync never runs in tests unless a test turns it on
 # ...and if a test turns the piforge link on, it reaches this stub, which only records its arguments.
