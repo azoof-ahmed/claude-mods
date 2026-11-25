@@ -4,15 +4,29 @@ import { isLight, startsHeavy } from './shell'
 type Job = { pid: number; elapsed: string; command: string }
 
 const SHOWN_JOBS = 3
-/** A tool server an agent session keeps open, whatever it is named after: never a job. */
-const MCP_SERVER = /(?:[@/-]mcp(?:@\S+)?|\bmcp[ -]server)(?=\s|$)/
+/**
+ * A tool server an agent session keeps open, whatever it is named after: never a job. Only the
+ * program counts, so a job on a folder named like one is still a job.
+ */
+const MCP_SERVER =
+  /^"?(?:\S*[/\\])?(?:(?:node|bun|bunx|npx|uvx|deno|npm exec|pnpm dlx|yarn dlx|bun x)(?:\.exe)?"?(?: (?:-y|--yes|--|--\S+=\S+))* "?)?(?:\S*[@/\\-]mcp(?:@[\w.^~-]+)?|(?:\S*[/\\])?playwright(?:@[\w.^~-]+)? (?:run-)?mcp(?:-server)?)(?:\.[cm]?js|\.exe|\.cmd)?"?(?=\s|$)/
 const SHOWN_CHARS = 120
 
 /** Claude's Bash tool wraps each command as `zsh -c source … && eval '<command>' …`. */
-function unwrap(command: string): string {
-  const evaled = /\beval '((?:[^']|'\\'')*)'/.exec(command)
+const WRAPPED = /^(\S*sh -l?c (?:-l )?source .*?\beval )'((?:[^']|'\\''|'"'"')*)'(.*)$/
 
-  return (evaled?.[1] ?? command).replaceAll(`'\\''`, `'`)
+/** The command Claude's shell was given, and the rest of that shell's line. */
+function unwrap(command: string): { script: string; around: string } | undefined {
+  const m = WRAPPED.exec(command)
+
+  if (m === null) {
+    return undefined
+  }
+
+  // ps on macOS prints a newline as \012 and a tab as \011
+  const script = (m[2] ?? '').replace(/'\\''|'"'"'/g, `'`).replaceAll('\\012', '\n').replaceAll('\\011', '\t')
+
+  return { script, around: `${m[1]} ${m[3]}` }
 }
 
 function clip(text: string): string {
@@ -87,15 +101,17 @@ export async function runningJobs(
     }
 
     // Claude's shell holds a script; anything else is a program and its arguments
-    const script = unwrap(command)
+    const shell = unwrap(command)
     const heavy =
-      script === command ? pattern.test(command) && !isLight(command) : startsHeavy(script, pattern)
+      shell === undefined
+        ? pattern.test(command) && !isLight(command)
+        : startsHeavy(shell.script, pattern) || pattern.test(shell.around)
 
     if (!heavy) {
       continue
     }
 
-    jobs.push({ pid: Number(match[1]), elapsed: match[2] ?? '', command: script })
+    jobs.push({ pid: Number(match[1]), elapsed: match[2] ?? '', command: shell?.script ?? command })
   }
 
   return jobs.sort((a, b) => a.pid - b.pid)

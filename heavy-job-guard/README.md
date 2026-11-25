@@ -10,6 +10,13 @@ Claude waits instead of piling on. Because it reads the process list rather than
 also sees jobs started in the background, by subagents, by other Claude sessions and in your own
 terminals.
 
+Text is not a command: a commit message, a search, a here-document or a note that mentions a test
+runner is let through, as long as every command in the script is one known to leave it as text
+(`git commit`, `grep`, `cat` and the like). As soon as the script also has something that may run the
+text (a shell, a script, an interpreter, a variable used as a command, or syntax it can't follow), any
+mention counts. A job that hides behind a script's own name is seen only once it is running, and a
+prompt sent to another agent is that agent's to run.
+
 It reads the process list with `ps` on macOS and Linux, and with PowerShell's process table
 (`Get-CimInstance Win32_Process`) on Windows. If neither works, it shows a toast once per check and lets
 the command run.
