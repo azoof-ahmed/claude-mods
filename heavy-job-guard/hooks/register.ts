@@ -1,8 +1,11 @@
 import type { EngineInterface, Register } from 'claude-code'
+import { isLight, startsHeavy } from './shell'
 
 type Job = { pid: number; elapsed: string; command: string }
 
 const SHOWN_JOBS = 3
+/** A tool server an agent session keeps open, whatever it is named after: never a job. */
+const MCP_SERVER = /(?:[@/-]mcp(?:@\S+)?|\bmcp[ -]server)(?=\s|$)/
 const SHOWN_CHARS = 120
 
 /** Claude's Bash tool wraps each command as `zsh -c source … && eval '<command>' …`. */
@@ -79,11 +82,20 @@ export async function runningJobs(
     const match = /^\s*(\d+)\s+(\S+)\s+(.*)$/.exec(line)
     const command = match?.[3] ?? ''
 
-    if (match === null || !pattern.test(command) || ignore.test(command)) {
+    if (match === null || MCP_SERVER.test(command) || ignore.test(command)) {
       continue
     }
 
-    jobs.push({ pid: Number(match[1]), elapsed: match[2] ?? '', command: unwrap(command) })
+    // Claude's shell holds a script; anything else is a program and its arguments
+    const script = unwrap(command)
+    const heavy =
+      script === command ? pattern.test(command) && !isLight(command) : startsHeavy(script, pattern)
+
+    if (!heavy) {
+      continue
+    }
+
+    jobs.push({ pid: Number(match[1]), elapsed: match[2] ?? '', command: script })
   }
 
   return jobs.sort((a, b) => a.pid - b.pid)
@@ -103,7 +115,7 @@ export const register: Register = (on, options) => {
   const ignore = new RegExp(String(options.ignore))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (!pattern.test(e.command)) {
+    if (!startsHeavy(e.command, pattern)) {
       return next(e)
     }
 

@@ -107,6 +107,22 @@ test('reads the Windows process table when ps is not available', async ($, on) =
   expect(JSON.stringify(answer)).toContain('pid 4242 (running 03:12)')
 })
 
+test('a tool server an agent keeps open is not a job', async ($, on) => {
+  answerPs(
+    on,
+    `${PS_IDLE}\n  869 06:00:00 npm exec @playwright/mcp@latest --output-dir x\n  892 06:00:00 node /x/.bin/playwright-mcp --output-dir x`,
+  )
+  let ran = false
+  on('tool.call', { tool: 'Bash' }, () => {
+    ran = true
+    return { result: { stdout: '', stderr: '', interrupted: false } }
+  })
+
+  await $.tool.call({ tool: 'Bash', command: 'bun run test' })
+
+  expect(ran).toBe(true)
+})
+
 test('formats elapsed seconds like ps', async () => {
   expect(etime(5)).toBe('00:05')
   expect(etime(3725)).toBe('01:02:05')
