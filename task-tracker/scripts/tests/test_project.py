@@ -54,6 +54,11 @@ class Places(unittest.TestCase):
                            capture_output=True, text=True, encoding='utf-8', stdin=subprocess.DEVNULL)
         return r.returncode, r.stdout, r.stderr
 
+    def lane_record(self, root, **lanes):
+        d = root / '.claude' / 'coord' / 'lanes'
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'lanes.json').write_text(json.dumps({r: {'repo': str(p)} for r, p in lanes.items()}), encoding='utf-8')
+
     def unchanged(self, cwd, *args, **env):
         before = tree(self.top)
         got = self.cli(cwd, *args, **env)
@@ -100,15 +105,63 @@ class ProjectTest(Places):
             self.section(self.lane, SECTION)
             self.assertEqual(root(), self.lane)
 
-    def test_the_hand_over_names_a_project(self):
-        lane = {'COORD_LANE': f'{self.alpha.as_posix()}#w'}
+    def found(self, cwd, lane, **kw):
         with mock.patch.dict(os.environ, self.env):
-            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane).root, self.alpha)
-            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane, init=True).root, self.beta)
-            for bad in ('', 'w', '#w', f'{self.home.as_posix()}/none#w', f'{self.home.as_posix()}#w'):
-                self.assertEqual(project.resolve(SECTION, STATE, self.beta, {'COORD_LANE': bad}).root, self.beta, bad)
-            self.section(self.beta, SECTION)
-            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane).root, self.beta)
+            return project.resolve(SECTION, STATE, cwd, {'COORD_LANE': lane}, **kw).root
+
+    def test_the_hand_over_wins_in_a_worktree_of_its_project(self):
+        lane = f'{self.alpha.as_posix()}#w'
+        self.section(self.lane, SECTION)
+        (self.lane / STATE).mkdir(parents=True)
+        self.assertEqual(self.found(self.lane, lane), self.alpha)
+        self.assertEqual(self.found(self.lane, ''), self.lane)
+        self.assertEqual(self.found(self.lane, lane, init=True), self.lane)
+
+    def test_the_hand_over_wins_in_the_lanes_repository_whatever_is_there(self):
+        lane = f'{self.alpha.as_posix()}#w'
+        self.lane_record(self.alpha, w=self.beta)
+        (self.beta / STATE).mkdir(parents=True)
+        self.section(self.beta, SECTION)
+        self.assertEqual(self.found(self.beta, lane), self.alpha)
+        self.git(self.beta, 'worktree', 'add', '-q', str(self.home / 'beta-lane'))
+        self.assertEqual(self.found(self.home / 'beta-lane', lane), self.alpha)
+        self.assertEqual(self.found(self.beta, lane, init=True), self.beta)
+
+    def test_the_hand_over_is_not_followed_anywhere_else(self):
+        self.section(self.alpha, 'coordinator', repos='.')
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#w'), self.beta)  # no record
+        self.lane_record(self.alpha, w=self.alpha)
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#w'), self.beta)  # another repository
+        self.lane_record(self.alpha, w=self.beta)
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#other'), self.beta)  # another lane
+        (self.home / 'loose').mkdir()
+        self.assertEqual(self.found(self.home / 'loose', f'{self.alpha.as_posix()}#w'), self.home / 'loose')
+        for bad in ('', 'w', '#w', f'{self.home.as_posix()}/none#w', f'{self.home.as_posix()}#w'):
+            self.assertEqual(self.found(self.beta, bad), self.beta, bad)
+
+    def test_a_session_without_a_record_follows_the_projects_repos(self):
+        self.section(self.alpha, 'coordinator', repos='.,../beta')
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#usage-watch'), self.alpha)
+
+    def test_a_bare_git_folder_beside_its_worktrees_has_no_main_checkout(self):
+        (self.home / 'proj').mkdir()
+        self.git(self.home, 'clone', '-q', '--bare', str(self.alpha), 'proj/.git')
+        self.git(self.home / 'proj', '--git-dir', '.git', 'worktree', 'add', '-q', '--detach', 'w')
+        self.assertIsNone(project.main_checkout(self.home / 'proj' / 'w'))
+
+    def test_a_linked_claude_folder_is_the_projects_own(self):
+        kept = self.top / 'dotfiles' / 'beta'
+        kept.mkdir(parents=True)
+        (self.beta / '.claude').symlink_to(kept)
+        project.Project(self.beta).refuse_outside('x', [self.beta / '.claude' / 'a', self.beta / 'b'])
+        with self.assertRaises(project.Refused):
+            project.Project(self.beta).refuse_outside('x', [self.top / 'dotfiles' / 'a'])
+
+    def test_a_folder_spelled_in_another_case_is_the_same(self):
+        other = Path(str(self.beta).replace('beta', 'BETA'))
+        if not other.exists():
+            self.skipTest('a case-sensitive file system')
+        self.assertTrue(project.under(other / 'x', self.beta))
 
 
 class TaskPathsTest(Places):
@@ -133,7 +186,7 @@ class TaskPathsTest(Places):
             self.assertEqual(self.unchanged(self.alpha, *args)[0], 2, args)
 
     def test_environment_paths_outside_the_project_are_refused(self):
-        for key, var in (('dbPath', 'TASKS_DB'), ('rolesFile', 'TASKS_ROLES'), ('importers', 'TASKS_IMPORTERS')):
+        for key, var in (('dbPath', 'TASKS_DB'), ('rolesFile', 'TASKS_ROLES')):
             for value in (str(self.alpha / 'x.py'), '../alpha/x.py'):
                 for verb in (['init'], ['list'], ['where']):
                     code, _, err = self.unchanged(self.beta, *verb, **{var: value})
@@ -163,6 +216,22 @@ class TaskPathsTest(Places):
             self.assertEqual(code, 2)
             self.assertIn('refusing dbPath', err)
 
+    def test_an_importer_outside_stops_only_import(self):
+        env = {'TASKS_IMPORTERS': str(self.alpha / 'x.py')}
+        (self.alpha / 'x.py').write_text('def records(ctx): raise SystemError("ran")')
+        for args in (['init'], ['new', 'a task'], ['list'], ['where']):
+            self.assertEqual(self.cli(self.beta, *args, **env)[0], 0, args)
+        code, _, err = self.unchanged(self.beta, 'import', **env)
+        self.assertEqual(code, 2)
+        self.assertIn('refusing the importer', err)
+
+    def test_help_inside_a_comment_is_text(self):
+        self.cli(self.beta, 'init')
+        self.cli(self.beta, 'new', 'a task')
+        self.assertEqual(self.cli(self.beta, 'comment', '1', 'run', 'ls', '-h')[0], 0)
+        self.assertIn('run ls -h', self.cli(self.beta, 'show', '1')[1])
+        self.assertIn('usage', self.unchanged(self.beta, 'comment', '1', '-h')[1])
+
     def test_init_lists_its_files_and_refuses_any_outside(self):
         code, out, _ = self.cli(self.beta, 'init')
         self.assertEqual(code, 0)
@@ -180,6 +249,7 @@ class TaskPathsTest(Places):
 
     def test_a_worker_uses_its_coordinators_project_but_never_inits_it(self):
         self.section(self.alpha, 'task-tracker', idPrefix='AL')
+        self.lane_record(self.alpha, w=self.beta)
         lane = f'{self.alpha.as_posix()}#w'
         self.assertEqual(self.where(self.beta, COORD_LANE=lane)['prefix'], 'AL')
         self.assertEqual(self.where(self.beta)['prefix'], 'TASK')

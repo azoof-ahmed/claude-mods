@@ -180,3 +180,32 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 }
+
+test('a refused where is shown once and not run again on every tick', async ($, on) => {
+  mock.env(on, {})
+  mock.store(on)
+  const clock = mock.clock(on)
+  let runs = 0
+  const toasts: string[] = []
+  on('session.root', () => ({ value: '/work/proj' }))
+  on('process.run', () => {
+    runs += 1
+    return { value: { exitCode: 2, stdout: '', stderr: 'error: task-tracker: refusing dbPath=/x', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.toast', ($$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.status', async () => ({ value: undefined }))
+  on('env.set', () => ({ value: undefined }))
+  on('command.register', ($$, e) => ({ value: { command: e.name } }))
+  on('session.start', async ($$, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/work/proj', surface: 'terminal', isInteractive: true })
+  const first = runs
+  await clock.advance(30000)
+
+  expect(runs).toBe(first)
+  expect(toasts.length).toBe(1)
+  expect(toasts[0]).toContain('refusing dbPath')
+})

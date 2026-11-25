@@ -638,9 +638,20 @@ def configure_from_args(a, env=None):
     return db.configure(config.load(flags, env=env, init=getattr(a, 'cmd', None) == 'init'))
 
 
+def free_text(argv):
+    """`comment ID run ls -h`: -h after the text has begun is a word of it, so a `--` is put before the text."""
+    for i, a in enumerate(argv):
+        if a == 'comment':
+            rest = argv[i + 1:]
+            if len(rest) > 2 and not any(x.startswith('-') for x in rest[:2]) and {'-h', '--help'} & set(rest[2:]):
+                return argv[:i + 2] + ['--'] + rest[1:]
+            break
+    return argv
+
+
 def main(argv=None):
     _enc_safe()
-    a = build_parser().parse_args(argv)
+    a = build_parser().parse_args(free_text(list(sys.argv[1:] if argv is None else argv)))
     try:
         configure_from_args(a)
         me = db.resolve_actor(a.as_name)

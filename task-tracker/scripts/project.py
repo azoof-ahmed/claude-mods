@@ -6,13 +6,15 @@ The same file ships with coordinator, agent-bus and task-tracker (each plugin in
   does not make the home folder a project.
 - A git worktree without its own section in .claude/claude-mods.json uses its main checkout, where that file
   (usually untracked) and the project's state live.
-- A worker started by a coordinator carries COORD_LANE=<project root>#<role>. That hand-over names its project, so it
-  works from a repository that has no section or state of its own. `init` never follows it.
+- A worker started by a coordinator carries COORD_LANE=<project root>#<role>. That hand-over names its project and wins
+  over the folder's own section and state, but only in that project's repository (its worktrees included) and in the
+  repository its lane record names (the project's `repos`, while there is no record). `init` never follows it.
 - A path that comes from the environment (the plugins' options arrive there) must lie in the project or its main
   checkout. Paths in the project's own file and typed flags may point anywhere.
 """
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -45,23 +47,58 @@ def git_top(d):
     return next((p for p in [d, *d.parents] if (p / '.git').exists()), None)
 
 
-def main_checkout(top):
-    """The main checkout of the worktree `top` (what `git rev-parse --git-common-dir` leads to), or None when `top`
-    is not a linked worktree, or its repository is bare."""
+def common_dir(top):
+    """What `git rev-parse --git-common-dir` gives in `top`: the folder every worktree of a repository shares."""
+    dot = top / '.git'
+    if dot.is_dir():
+        return dot.resolve()
     try:
-        text = (top / '.git').read_text(encoding='utf-8').strip()
+        text = dot.read_text(encoding='utf-8').strip()
         if not text.startswith('gitdir:'):
             return None
         gitdir = (top / text[len('gitdir:'):].strip()).resolve()
-        common = (gitdir / (gitdir / 'commondir').read_text(encoding='utf-8').strip()).resolve()
-    except (OSError, ValueError):  # a folder (an ordinary checkout), or no commondir (a submodule)
+    except (OSError, ValueError):
         return None
-    return common.parent if common.name == '.git' and common.is_dir() else None
+    try:
+        return (gitdir / (gitdir / 'commondir').read_text(encoding='utf-8').strip()).resolve()
+    except (OSError, ValueError):  # a submodule: its own repository
+        return gitdir
+
+
+def main_checkout(top):
+    """The main checkout of the linked worktree `top`, or None: `top` is not a linked worktree, or its repository is
+    bare (wherever it lies, a `.git` folder beside the worktrees included)."""
+    common = None if (top / '.git').is_dir() else common_dir(top)
+    if common is None or common.name != '.git' or not common.is_dir():
+        return None
+    try:
+        if re.search(r'^\s*bare\s*=\s*true\s*$', (common / 'config').read_text(encoding='utf-8'), re.M | re.I):
+            return None
+    except (OSError, ValueError):
+        pass
+    return common.parent
+
+
+def same_place(a, b):
+    """Whether two folders are in one repository; without git, whether `a` lies under `b`."""
+    ta, tb = git_top(a), git_top(b)
+    if ta and tb:
+        ca = common_dir(ta)
+        return ca is not None and ca == common_dir(tb)
+    return tb is None and under(a, b)
 
 
 def under(path, folder):
     path, folder = os.path.realpath(path), os.path.realpath(folder)
-    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+    if path == folder or path.startswith(folder.rstrip(os.sep) + os.sep):
+        return True
+    for p in (Path(path), *Path(path).parents):  # the same folder spelled in another case
+        try:
+            if os.path.samefile(p, folder):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 class Project:
@@ -71,7 +108,9 @@ class Project:
         self.root = Path(root)
         self.file = self.root / FILE
         self.places = []
-        for p in (self.root, *places):
+        linked = self.root / '.claude'  # a .claude kept elsewhere and linked in is the project's own
+        extra = [linked.resolve()] if linked.is_symlink() and linked.resolve() != home() / '.claude' else []
+        for p in (self.root, *places, *extra):
             wide = under(home(), p) and not (p / '.git').exists()  # the home folder, or one above it
             if p not in self.places and not wide:
                 self.places.append(p)
@@ -83,7 +122,7 @@ class Project:
             return True
         return any(under(self.root / p, d) for d in self.places)
 
-    def check_env(self, mod, section, key, var, value, default):
+    def check_env(self, mod, section, key, var, value, default, flag=None):
         """Refuse an environment path outside the project; warn about one inside it."""
         if value == default:
             return
@@ -91,7 +130,9 @@ class Project:
         if not self.holds(value):
             raise Refused(f'{mod}: refusing {key}={value} (the {key} plugin option, or {var} in the environment): it '
                           f'is outside this project ({self.root}). To use it here, {fix}; and remove the {key} option '
-                          f'from your user settings (pluginConfigs["{section}"].options).')
+                          f'from your user settings (pluginConfigs["{section}"].options).'
+                          + (f' A session that a coordinator started before this version: use `{flag} {value}` with '
+                             f'each command, or have it respawned.' if flag else ''))
         print(f'{mod}: {key} comes from a plugin option or {var}; paths belong to one project, and the next version '
               f'stops reading them there: {fix}.', file=sys.stderr)
 
@@ -130,11 +171,27 @@ def section_of(root, section):
     return data if isinstance(data, dict) else None
 
 
-def handed_over(env=None):
-    """The project root a coordinator named when it started this worker, or None."""
-    root = (os.environ if env is None else env).get(HANDOVER, '').rpartition('#')[0]
+def handed_over(here, env=None):
+    """The project a coordinator named when it started this worker, when `here` is a place it works in; else None."""
+    root, _, role = (os.environ if env is None else env).get(HANDOVER, '').rpartition('#')
     p = Path(root)
-    return p.resolve() if root and p.is_absolute() and p.is_dir() and is_project(p) else None
+    if not root or not p.is_absolute() or not p.is_dir() or not is_project(p.resolve()):
+        return None
+    p = p.resolve()
+    if same_place(here, p):
+        return p
+    coord = section_of(p, 'coordinator') or {}
+    try:
+        lanes = json.loads((p / str(coord.get('cardsDir') or '.claude/coord/lanes') / 'lanes.json')
+                           .read_text(encoding='utf-8'))
+        lane = lanes.get(role)
+    except (OSError, ValueError, AttributeError):
+        lane = None
+    if isinstance(lane, dict) and lane.get('repo'):
+        repos = [str(lane['repo'])]
+    else:  # not recorded (yet), as the usage watcher
+        repos = [r.strip() for r in str(coord.get('repos') or '').split(',') if r.strip()]
+    return p if any(same_place(here, (p / r).resolve()) for r in repos) else None
 
 
 def resolve(section, state, start=None, env=None, init=False):
@@ -153,7 +210,7 @@ def resolve(section, state, start=None, env=None, init=False):
     root = own
     if section_of(own, section) is None and shared and (used(shared) or not used(own)):
         root = shared
-    handed = None if init else handed_over(env)
-    if handed and not used(root):
+    handed = None if init else handed_over(own, env)
+    if handed:
         return Project(handed)
     return Project(root, [p for p in (own, top, main) if p])

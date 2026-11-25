@@ -62,6 +62,7 @@ class Config:
     notify_command: str = ''
     sources: dict = field(default_factory=dict)
     project: Optional[projects.Project] = None
+    importers_refused: str = ''
 
     def as_dict(self) -> dict:
         return {'root': str(self.root), 'db': str(self.db_path), 'db_exists': self.db_path.exists(),
@@ -103,13 +104,15 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
 
     for key in PATHS:
         if sources[key] == 'env':
-            proj.check_env('task-tracker', SECTION, key, ENV[key], values[key], DEFAULTS[key])
-    if sources['importers'] == 'env':
+            proj.check_env('task-tracker', SECTION, key, ENV[key], values[key], DEFAULTS[key],
+                           {'dbPath': '--db', 'rolesFile': '--roles'}[key])
+    refused = ''
+    if sources['importers'] == 'env':  # only `import` runs them, so only `import` is refused
         for entry in _split(values['importers']):
             if entry.endswith('.py') and not any(c.isspace() for c in entry) and not proj.holds(entry):
-                raise Refused(f'task-tracker: refusing the importer {entry} (the importers plugin option, or '
-                              f'{ENV["importers"]} in the environment): it is outside this project ({root}). Set '
-                              f'"importers" in the "{SECTION}" section of {pf}.')
+                refused = (f'task-tracker: refusing the importer {entry} (the importers plugin option, or '
+                           f'{ENV["importers"]} in the environment): it is outside this project ({root}). Set '
+                           f'"importers" in the "{SECTION}" section of {pf}.')
 
     def path(v: str) -> Path:
         p = Path(os.path.expanduser(v))
@@ -118,4 +121,5 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
     prefix = values['idPrefix'].strip().rstrip('-') or DEFAULTS['idPrefix']
     return Config(root=root, db_path=path(values['dbPath']), roles_path=path(values['rolesFile']), prefix=prefix,
                   labels=_split(values['labels']), importers=_split(values['importers']),
-                  notify_command=values['notifyCommand'].strip(), sources=sources, project=proj)
+                  notify_command=values['notifyCommand'].strip(), sources=sources, project=proj,
+                  importers_refused=refused)

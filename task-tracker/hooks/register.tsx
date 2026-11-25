@@ -126,10 +126,20 @@ async function runTask($: $T, args: string[]): Promise<Run> {
   return { ok: false, out: '', err: `no Python found (tried ${order.join(', ')}; set the python option). ${last}`, code: -1 }
 }
 
+/** After `where` fails, the timer leaves it alone this long: it stays refused until a setting changes. */
+const WHERE_RETRY_MS = 5 * 60 * 1000
+let refusedUntil = 0
+let refusalShown = false
+
 async function loadWhere($: $T): Promise<Where | null> {
   const r = await runTask($, ['where', '--json'])
   if (!r.ok) {
     await update($, error, () => short(r.err || 'task.py where failed', 300))
+    refusedUntil = Date.now() + WHERE_RETRY_MS
+    if (!refusalShown && r.err.includes('refusing')) {
+      refusalShown = true
+      $.ui.toast(r.err)
+    }
     return null
   }
   try {
@@ -196,7 +206,9 @@ function commandPrefix($: $T): string {
 }
 
 async function poll($: $T, state: { stamp: string }): Promise<void> {
-  const cur = (await read($, where)) ?? (await loadWhere($))
+  const known = await read($, where)
+  if (!known && Date.now() < refusedUntil) return
+  const cur = known ?? (await loadWhere($))
   if (!cur) return
   const a = await $.fs.stat(cur.db).catch(() => null)
   const wal = await $.fs.stat(`${cur.db}-wal`).catch(() => null)
@@ -220,6 +232,8 @@ export const register: Register = (on, options) => {
     TASKS_NOTIFY_CMD: opt(options, 'notifyCommand'),
   }
   found = null
+  refusedUntil = 0
+  refusalShown = false
 
   // ----------------------------------------------------------------------------------------- session
 
