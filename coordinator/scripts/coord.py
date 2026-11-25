@@ -790,8 +790,8 @@ def orphans(cfg, lanes, sessions=None, handles=None):
 
 def render(text, cfg, role='<role>'):
     vals = {
-        'role': role, 'rules': rel(cfg, cfg.path('rulesFile')), 'cards': rel(cfg, cfg.path('cardsDir')),
-        'briefs': rel(cfg, cfg.path('briefsDir')), 'reports': rel(cfg, cfg.path('reportsDir')),
+        'role': role, 'rules': root_rel(cfg, cfg.path('rulesFile')), 'cards': root_rel(cfg, cfg.path('cardsDir')),
+        'briefs': root_rel(cfg, cfg.path('briefsDir')), 'reports': root_rel(cfg, cfg.path('reportsDir')),
         'retire_tokens': f"{cfg['retireTokens'] // 1000}k", 'pause_percent': cfg['pauseSessionPercent'],
         'pause_weekly': cfg['pauseWeeklyPercent'],
         'coord': 'coord',  # the session context names the real command; plugin paths change between versions
@@ -801,11 +801,29 @@ def render(text, cfg, role='<role>'):
     return text
 
 
-def rel(cfg, p):
+def root_rel(cfg, p):
+    """A path from the project root, for text that stays in the project."""
     try:
         return Path(p).resolve().relative_to(cfg.root.resolve()).as_posix()
     except ValueError:
         return Path(p).as_posix()
+
+
+def rel_in(cfg, p, where):
+    """A path as someone working in `where` can open it: from the project root there, else absolute."""
+    p = Path(p)
+    if project.find_root(where) == cfg.root.resolve():
+        return root_rel(cfg, p)
+    return (p if p.is_absolute() else cfg.root / p).resolve().as_posix()
+
+
+def rel(cfg, p):
+    return rel_in(cfg, p, None)
+
+
+def lane_card(cfg, role, lane):
+    """The lane's card as the lane itself can open it."""
+    return rel_in(cfg, cfg.path('cardsDir') / f'{role}.md', (lane or {}).get('repo') or cfg.root)
 
 
 def cmd_init(cfg, args):
@@ -857,7 +875,7 @@ def is_coordinator(role, lane):
 
 def cmd_spawn(cfg, args):
     dry = '--dry-run' in args
-    repo = take(args, '--repo') or cfg.repos()[0]
+    repo = os.path.abspath(take(args, '--repo') or cfg.repos()[0])
     model = take(args, '--model')
     pos = [a for a in args if not a.startswith('--')]
     if not pos:
@@ -868,6 +886,10 @@ def cmd_spawn(cfg, args):
     brief = pos[1] if len(pos) > 1 else rel(cfg, cfg.path('briefsDir') / 'RESUME.md')
     if not (cfg.root / brief).exists() and not Path(brief).exists():
         raise SystemExit(f'coordinator: no brief at {brief}')
+    if project.find_root(repo) != cfg.root.resolve() and not Path(brief).is_absolute():
+        # the worker starts elsewhere, where a path from the project root names another file
+        found = cfg.root / brief if (cfg.root / brief).exists() else Path(brief)
+        brief = found.resolve().as_posix()
     lanes = load_lanes(cfg)
     coordinator = is_coordinator(role, lanes.get(role, {})) or '--coordinator' in args
     live = [r for r, l in lanes.items() if l.get('state') == 'live' and r != role and not is_coordinator(r, l)]
@@ -912,7 +934,7 @@ def cmd_retire(cfg, args):
     lane = lanes.get(role)
     if not lane:
         raise SystemExit(f'coordinator: no lane {role}')
-    card = rel(cfg, cfg.path('cardsDir') / f'{role}.md')
+    card = lane_card(cfg, role, lane)
     text = (f'Retire now: update your lane card {card} (state, next 3 actions, anchors, open messages) so a successor '
             'can resume from it alone, finish or park the current step, then end with SAFE TO CLOSE.')
     r = bus(cfg, 'send', role, text, '--prio', 'urgent', '--from', 'coordinator', '--topic', 'retire')
@@ -1110,7 +1132,7 @@ def cmd_reap(cfg, args):
 def cmd_ask(cfg, args):
     frm = take(args, '--from') or os.environ.get('AGENT_BUS_ROLE') or 'coordinator'
     opts = take(args, '--options')
-    pos = [a for a in args if not a.startswith('--')]
+    pos = args  # free text, flag-like words included
     if not pos:
         raise SystemExit('usage: ask "<question>" [--from ROLE] [--options "a|b"]')
     n = len(load_questions(cfg)) + 1
@@ -1134,7 +1156,7 @@ def cmd_questions(cfg, args):
 
 
 def cmd_answer(cfg, args):
-    pos = [a for a in args if not a.startswith('--')]
+    pos = args  # what follows the id is text, flag-like words included
     if len(pos) < 2:
         raise SystemExit('usage: answer <qid> "<answer>"')
     qid, ans = pos[0], ' '.join(pos[1:])
@@ -1639,7 +1661,7 @@ def pause_tick(cfg, st, dry=False):
             interrupt(cfg, lane, dry)
             pl['state'], pl['closed_at'] = 'interrupted', now()
         elif t - pl['asked'] >= cfg['pauseReminderMin'] * 60 and not pl.get('reminded'):
-            tell(cfg, role, 'REMINDER: ' + PAUSE_TEXT.format(card=rel(cfg, cfg.path('cardsDir') / f'{role}.md'))
+            tell(cfg, role, 'REMINDER: ' + PAUSE_TEXT.format(card=lane_card(cfg, role, lane))
                  + f" You will be interrupted in {int(cfg['pauseGraceMin'] - cfg['pauseReminderMin'])} min.")
             pl['reminded'] = now()
         if pl['state'] in ('paused', 'interrupted') and role in lanes:
@@ -1667,7 +1689,7 @@ def cmd_pause(cfg, args):
             st = {'state': 'pausing', 'started_at': now(), 'started': clock(),
                   'lanes': {r: {'state': 'asked', 'asked': clock()} for r in live}}
             for r in live:
-                tell(cfg, r, PAUSE_TEXT.format(card=rel(cfg, cfg.path('cardsDir') / f'{r}.md')))
+                tell(cfg, r, PAUSE_TEXT.format(card=lane_card(cfg, r, lanes.get(r))))
             print(f"pause: asked {len(live)} lane(s) to checkpoint: {', '.join(live) or 'none'}. Reminder after "
                   f"{cfg['pauseReminderMin']:g} min, interrupt after {cfg['pauseGraceMin']:g} min.")
     while True:
@@ -1799,6 +1821,35 @@ def flag_error(verb, args):
     return None
 
 
+def verb_at(args):
+    """Where the verb is: after the global flags."""
+    i = 0
+    while i < len(args) and args[i].startswith('-'):
+        i += 2 if args[i] + '=' in GLOBAL_FLAGS else 1
+    return i
+
+
+# Verbs whose words are free text, and how many of them come before the text.
+FREE_TEXT = {'ask': 0, 'answer': 1}
+
+
+def text_at(verb, args, at):
+    """Where a verb's free text begins; the end for a verb without one."""
+    if verb not in FREE_TEXT:
+        return len(args)
+    before, i = FREE_TEXT[verb], at + 1
+    while i < len(args):
+        if args[i] + '=' in FLAGS.get(verb, ()) + GLOBAL_FLAGS:
+            i += 2
+            continue
+        if not FLAG_RE.fullmatch(args[i]):
+            if before == 0:
+                return i
+            before -= 1
+        i += 1
+    return len(args)
+
+
 def verb_help(verb):
     """The lines of the usage text for one verb."""
     out, on = [], False
@@ -1817,19 +1868,25 @@ def main(argv=None):
     if not args or args[0] in ('-h', '--help', 'help'):
         print(__doc__)
         return 0
-    if '-h' in args or '--help' in args:  # before anything is read or written
-        verb = next((a for a in args if a in VERBS or a == 'config'), None)
-        print(verb_help(verb) if verb else __doc__)
+    at = verb_at(args)
+    verb = args[at] if at < len(args) else ''
+    end = text_at(verb, args, at)
+    if '-h' in args[:end] or '--help' in args[:end]:  # before anything is read or written
+        print(verb_help(verb))
         return 0
-    bad = flag_error(next((a for a in args if a in VERBS), ''), args)
+    # a free text's own words are never flags, but the verb's documented ones may follow it
+    bad = flag_error(verb, args[:end])
     if bad:
         print(f'coordinator: {bad} (--help lists the flags)', file=sys.stderr)
         return 2
     flags = {}
+    text = args[end:]
+    del args[end:]
     for k in ('backend', 'repos', 'workerModel', 'maxLanes'):
         v = take(args, '--' + re.sub(r'(?<!^)(?=[A-Z])', '-', k).lower())
         if v:
             flags[k] = v
+    args += text
     if not args:
         print(__doc__)
         return 2

@@ -54,6 +54,11 @@ class Places(unittest.TestCase):
                            capture_output=True, text=True, encoding='utf-8', stdin=subprocess.DEVNULL)
         return r.returncode, r.stdout, r.stderr
 
+    def lane_record(self, root, **lanes):
+        d = root / '.claude' / 'coord' / 'lanes'
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'lanes.json').write_text(json.dumps({r: {'repo': str(p)} for r, p in lanes.items()}), encoding='utf-8')
+
     def unchanged(self, cwd, *args, **env):
         before = tree(self.top)
         got = self.cli(cwd, *args, **env)
@@ -100,15 +105,63 @@ class ProjectTest(Places):
             self.section(self.lane, SECTION)
             self.assertEqual(root(), self.lane)
 
-    def test_the_hand_over_names_a_project(self):
-        lane = {'COORD_LANE': f'{self.alpha.as_posix()}#w'}
+    def found(self, cwd, lane, **kw):
         with mock.patch.dict(os.environ, self.env):
-            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane).root, self.alpha)
-            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane, init=True).root, self.beta)
-            for bad in ('', 'w', '#w', f'{self.home.as_posix()}/none#w', f'{self.home.as_posix()}#w'):
-                self.assertEqual(project.resolve(SECTION, STATE, self.beta, {'COORD_LANE': bad}).root, self.beta, bad)
-            self.section(self.beta, SECTION)
-            self.assertEqual(project.resolve(SECTION, STATE, self.beta, lane).root, self.beta)
+            return project.resolve(SECTION, STATE, cwd, {'COORD_LANE': lane}, **kw).root
+
+    def test_the_hand_over_wins_in_a_worktree_of_its_project(self):
+        lane = f'{self.alpha.as_posix()}#w'
+        self.section(self.lane, SECTION)
+        (self.lane / STATE).mkdir(parents=True)
+        self.assertEqual(self.found(self.lane, lane), self.alpha)
+        self.assertEqual(self.found(self.lane, ''), self.lane)
+        self.assertEqual(self.found(self.lane, lane, init=True), self.lane)
+
+    def test_the_hand_over_wins_in_the_lanes_repository_whatever_is_there(self):
+        lane = f'{self.alpha.as_posix()}#w'
+        self.lane_record(self.alpha, w=self.beta)
+        (self.beta / STATE).mkdir(parents=True)
+        self.section(self.beta, SECTION)
+        self.assertEqual(self.found(self.beta, lane), self.alpha)
+        self.git(self.beta, 'worktree', 'add', '-q', str(self.home / 'beta-lane'))
+        self.assertEqual(self.found(self.home / 'beta-lane', lane), self.alpha)
+        self.assertEqual(self.found(self.beta, lane, init=True), self.beta)
+
+    def test_the_hand_over_is_not_followed_anywhere_else(self):
+        self.section(self.alpha, 'coordinator', repos='.')
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#w'), self.beta)  # no record
+        self.lane_record(self.alpha, w=self.alpha)
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#w'), self.beta)  # another repository
+        self.lane_record(self.alpha, w=self.beta)
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#other'), self.beta)  # another lane
+        (self.home / 'loose').mkdir()
+        self.assertEqual(self.found(self.home / 'loose', f'{self.alpha.as_posix()}#w'), self.home / 'loose')
+        for bad in ('', 'w', '#w', f'{self.home.as_posix()}/none#w', f'{self.home.as_posix()}#w'):
+            self.assertEqual(self.found(self.beta, bad), self.beta, bad)
+
+    def test_a_session_without_a_record_follows_the_projects_repos(self):
+        self.section(self.alpha, 'coordinator', repos='.,../beta')
+        self.assertEqual(self.found(self.beta, f'{self.alpha.as_posix()}#usage-watch'), self.alpha)
+
+    def test_a_bare_git_folder_beside_its_worktrees_has_no_main_checkout(self):
+        (self.home / 'proj').mkdir()
+        self.git(self.home, 'clone', '-q', '--bare', str(self.alpha), 'proj/.git')
+        self.git(self.home / 'proj', '--git-dir', '.git', 'worktree', 'add', '-q', '--detach', 'w')
+        self.assertIsNone(project.main_checkout(self.home / 'proj' / 'w'))
+
+    def test_a_linked_claude_folder_is_the_projects_own(self):
+        kept = self.top / 'dotfiles' / 'beta'
+        kept.mkdir(parents=True)
+        (self.beta / '.claude').symlink_to(kept)
+        project.Project(self.beta).refuse_outside('x', [self.beta / '.claude' / 'a', self.beta / 'b'])
+        with self.assertRaises(project.Refused):
+            project.Project(self.beta).refuse_outside('x', [self.top / 'dotfiles' / 'a'])
+
+    def test_a_folder_spelled_in_another_case_is_the_same(self):
+        other = Path(str(self.beta).replace('beta', 'BETA'))
+        if not other.exists():
+            self.skipTest('a case-sensitive file system')
+        self.assertTrue(project.under(other / 'x', self.beta))
 
 
 class CoordPathsTest(Places):
@@ -191,9 +244,54 @@ class CoordPathsTest(Places):
 
     def test_a_worker_uses_its_coordinators_project(self):
         self.section(self.alpha, 'coordinator', maxLanes=3)
+        self.lane_record(self.alpha, w=self.beta)
         lane = coord.lane_key(coord.Config(self.alpha), 'w')
         self.assertEqual(self.config(self.beta, COORD_LANE=lane)[1]['maxLanes'], 3)
         self.assertEqual(self.config(self.beta)[1]['maxLanes'], 6)
+
+    def test_a_worker_elsewhere_gets_absolute_paths(self):
+        self.section(self.alpha, 'coordinator', maxLanes=3)
+        self.lane_record(self.alpha, w=self.beta, v=self.lane)
+        for cwd, role in ((self.beta, 'w'), (self.lane, 'v')):
+            env = {'COORD_LANE': f'{self.alpha.as_posix()}#{role}', 'AGENT_BUS_ROLE': role}
+            ctx = json.loads(self.cli(cwd, 'context', **env)[1])
+            self.assertEqual(ctx['card'], (self.alpha / f'.claude/coord/lanes/{role}.md').as_posix())
+            self.assertEqual(ctx['rules'], (self.alpha / '.claude/coord/RULES_CORE.md').as_posix())
+            self.assertEqual(self.cli(cwd, 'ask', f'from {role}', **env)[0], 0)
+            self.assertFalse((cwd / '.claude').exists())
+        out = self.cli(self.alpha, 'questions')[1]
+        self.assertIn('from w', out)
+        self.assertIn('from v', out)
+        ctx = json.loads(self.cli(self.alpha, 'context', AGENT_BUS_ROLE='w')[1])
+        self.assertEqual(ctx['card'], '.claude/coord/lanes/w.md')
+
+    def test_a_committed_section_does_not_detach_a_worktree_worker(self):
+        self.section(self.alpha, 'coordinator', maxLanes=3)
+        self.section(self.lane, 'coordinator', maxLanes=3)
+        self.cli(self.lane, 'ask', 'to the coordinator', COORD_LANE=f'{self.alpha.as_posix()}#w')
+        self.assertIn('to the coordinator', self.cli(self.alpha, 'questions')[1])
+
+    def test_spawn_elsewhere_names_the_brief_absolutely(self):
+        self.cli(self.alpha, 'init', AGENT_BUS_CLI=os.devnull)
+        brief = (self.alpha / '.claude/coord/briefs/RESUME.md').as_posix()
+        for repo in (self.beta, self.lane):
+            out = self.cli(self.alpha, 'spawn', 'w', '--repo', str(repo), '--dry-run')[1]
+            self.assertIn(f'Read {brief} ', out)
+        out = self.cli(self.alpha, 'spawn', 'w', '--dry-run')[1]
+        self.assertIn('Read .claude/coord/briefs/RESUME.md ', out)
+
+    def test_help_inside_free_text_is_text(self):
+        self.cli(self.alpha, 'ask', 'which?')
+        qid = self.cli(self.alpha, 'questions')[1].split()[0]
+        code, _, err = self.cli(self.alpha, 'answer', qid, 'run', 'ls', '-h', '--force', '--repos', 'x')
+        self.assertEqual(code, 0, err)
+        self.assertIn('run ls -h --force --repos x', self.cli(self.alpha, 'questions', '--all')[1])
+        self.assertEqual(self.cli(self.alpha, 'ask', 'is', '--help', 'fine?', '--from', 'w', '--options', 'a|b')[0], 0)
+        out = self.cli(self.alpha, 'questions')[1]
+        self.assertIn('(w,', out)
+        self.assertIn('is --help fine? [a|b]', out)
+        for args in (['answer', '-h'], ['answer', qid, '--help'], ['ask', '--from', 'w', '-h']):
+            self.assertIn('coord.py', self.unchanged(self.alpha, *args)[1])
 
     def test_init_lists_its_files_first(self):
         code, out, _ = self.cli(self.beta, 'init', AGENT_BUS_CLI=os.devnull)
@@ -209,6 +307,7 @@ class CoordPathsTest(Places):
 
     def test_a_worker_never_inits_its_coordinators_project(self):
         self.section(self.alpha, 'coordinator', maxLanes=3)
+        self.lane_record(self.alpha, w=self.beta)
         before = tree(self.alpha)
         self.cli(self.beta, 'init', COORD_LANE=f'{self.alpha}#w')
         self.assertEqual(tree(self.alpha), before)
