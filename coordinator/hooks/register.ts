@@ -19,17 +19,6 @@ export type CoordContext = {
   refused?: string
 }
 
-/** Options that named one project's paths. No longer offered; still passed on for one version. */
-const OLD_PATH_OPTIONS = {
-  repos: 'COORD_REPOS',
-  busDir: 'COORD_BUS_DIR',
-  trackerDb: 'COORD_TRACKER_DB',
-  rulesFile: 'COORD_RULES_FILE',
-  briefsDir: 'COORD_BRIEFS_DIR',
-  cardsDir: 'COORD_CARDS_DIR',
-  reportsDir: 'COORD_REPORTS_DIR',
-} as const
-
 const USAGE_EVERY_CALLS = 10
 const RETIRE_STEP = 0.1 // remind again every further 10% past the threshold
 
@@ -178,12 +167,28 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Bash children (the model's own coord.py runs, shell workers it starts) inherit these.
     await $.env.set('COORD_CLI', `${$.plugin.root}/scripts/coord.py`)
+    // Paths belong to one project: no longer offered as options, and still passed on for one version.
     const given: Readonly<Record<string, unknown>> = options
-    for (const [key, name] of Object.entries(OLD_PATH_OPTIONS)) {
-      const value = str(given[key], '')
-      if (value !== '') {
-        await $.env.set(name, value)
-      }
+    if (str(given.repos, '') !== '') {
+      await $.env.set('COORD_REPOS', str(given.repos, ''))
+    }
+    if (str(given.busDir, '') !== '') {
+      await $.env.set('COORD_BUS_DIR', str(given.busDir, ''))
+    }
+    if (str(given.trackerDb, '') !== '') {
+      await $.env.set('COORD_TRACKER_DB', str(given.trackerDb, ''))
+    }
+    if (str(given.rulesFile, '') !== '') {
+      await $.env.set('COORD_RULES_FILE', str(given.rulesFile, ''))
+    }
+    if (str(given.briefsDir, '') !== '') {
+      await $.env.set('COORD_BRIEFS_DIR', str(given.briefsDir, ''))
+    }
+    if (str(given.cardsDir, '') !== '') {
+      await $.env.set('COORD_CARDS_DIR', str(given.cardsDir, ''))
+    }
+    if (str(given.reportsDir, '') !== '') {
+      await $.env.set('COORD_REPORTS_DIR', str(given.reportsDir, ''))
     }
     await $.env.set('COORD_BACKEND', str(options.backend, 'manual'))
     await $.env.set('COORD_SHELL', str(options.shell, 'auto'))
