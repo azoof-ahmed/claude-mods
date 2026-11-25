@@ -37,8 +37,6 @@ const DEFAULTS: Record<string, string> = {
   python: 'python',
   identity: 'user',
   idPrefix: 'TASK',
-  dbPath: '.claude/tasks/tasks.db',
-  rolesFile: '.claude/tasks/roles.toml',
   labels: 'bug,feature,chore,docs,test,blocked-external',
   importers: '',
   notifyCommand: '',
@@ -92,8 +90,8 @@ async function exportEnv($: $T): Promise<void> {
   const v = cfg.env
   await $.env.set('TASKS_CLI', scriptPath($))
   await $.env.set('TASKS_PREFIX', v.TASKS_PREFIX)
-  await $.env.set('TASKS_DB', v.TASKS_DB)
-  await $.env.set('TASKS_ROLES', v.TASKS_ROLES)
+  if (v.TASKS_DB) await $.env.set('TASKS_DB', v.TASKS_DB)
+  if (v.TASKS_ROLES) await $.env.set('TASKS_ROLES', v.TASKS_ROLES)
   await $.env.set('TASKS_LABELS', v.TASKS_LABELS)
   await $.env.set('TASKS_IMPORTERS', v.TASKS_IMPORTERS)
   await $.env.set('TASKS_NOTIFY_CMD', v.TASKS_NOTIFY_CMD)
@@ -219,8 +217,9 @@ export const register: Register = (on, options) => {
   cfg.refreshMs = Math.max(0, Number(options.refreshSeconds ?? 3)) * 1000
   cfg.env = {
     TASKS_PREFIX: opt(options, 'idPrefix'),
-    TASKS_DB: opt(options, 'dbPath'),
-    TASKS_ROLES: opt(options, 'rolesFile'),
+    // paths belong to one project: no longer offered as options, and still passed on for one version
+    ...(opt(options, 'dbPath') ? { TASKS_DB: opt(options, 'dbPath') } : {}),
+    ...(opt(options, 'rolesFile') ? { TASKS_ROLES: opt(options, 'rolesFile') } : {}),
     TASKS_LABELS: opt(options, 'labels'),
     TASKS_IMPORTERS: opt(options, 'importers'),
     TASKS_NOTIFY_CMD: opt(options, 'notifyCommand'),
@@ -267,6 +266,12 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'tasks' }, async ($, e) => {
     const toks = (e.args ?? '').trim().split(/\s+/).filter(Boolean)
+    const usage =
+      'Usage: /tasks [<id> | board | list | progress | conflicts | init | area=x prio=high label=bug | clear]'
+    if (toks.some(t => t === '-h' || t === '--help' || t === 'help')) return { text: usage }
+    const flag = toks.find(t => t.startsWith('-'))
+    if (flag !== undefined) return { text: `unknown flag ${flag}. ${usage}` }
+    if (toks.includes('init') && toks.length > 1) return { text: `init takes no arguments. ${usage}` }
     let text = ''
     let w = await read($, where)
     if (!w?.db_exists) w = await loadWhere($)

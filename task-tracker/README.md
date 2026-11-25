@@ -45,15 +45,12 @@ Set them in `/config`, or in settings under `pluginConfigs["task-tracker"].optio
 | `python` | `python` | Interpreter for the CLI. If it does not start, `python`, `python3` and `py` are tried in turn. |
 | `identity` | `user` | The name the `/tasks` pane acts as. Agents use `--as <name>` or `TASKS_AS`. |
 | `idPrefix` | `TASK` | Task ids read `<prefix>-<n>`. |
-| `dbPath` | `.claude/tasks/tasks.db` | The database, relative to the project root (nearest folder with `.git` or `.claude`). |
-| `rolesFile` | `.claude/tasks/roles.toml` | Names and permission levels. Missing: everyone may do everything. |
 | `labels` | `bug,feature,chore,docs,test,blocked-external` | The label vocabulary; other labels are refused. Empty: any label. |
 | `importers` | (none) | Sources `task.py import` reads; see [Importers](#importers). |
 | `notifyCommand` | (none) | Run for each notification, with `{to}` `{sender}` `{key}` `{prio}` `{text}` filled in (no shell). |
 | `refreshSeconds` | `3` | How often the status line, band and pane check for changes. `0` turns live updates off. |
 
-The plugin hands these to the CLI as environment variables (`TASKS_PREFIX`, `TASKS_DB`, `TASKS_ROLES`,
-`TASKS_LABELS`, `TASKS_IMPORTERS`, `TASKS_NOTIFY_CMD`), and sets `TASKS_CLI` to the CLI's path, so the model's shell
+The plugin hands these to the CLI as environment variables (`TASKS_PREFIX`, `TASKS_LABELS`, `TASKS_IMPORTERS`, `TASKS_NOTIFY_CMD`), and sets `TASKS_CLI` to the CLI's path, so the model's shell
 and any worker started from the session use the same tracker. A project can pin its own settings, which beat the
 plugin options, in `.claude/claude-mods.json`:
 
@@ -63,6 +60,15 @@ plugin options, in `.claude/claude-mods.json`:
 
 Precedence: CLI flags (`--db`, `--roles`, `--prefix`, `--labels`, `--importers`, `--notify-cmd`) > the project file
 > environment variables > defaults. `task.py where` shows what was resolved and from where.
+
+### Paths
+
+Paths belong to one project, so they are not plugin options: set `dbPath`, `rolesFile` in the `"task-tracker"` section of the project's `.claude/claude-mods.json`. A path that still comes from an old option or the environment (`TASKS_DB`, `TASKS_ROLES`) is used with a warning when it is inside the project or its main checkout, and refused when it is outside; the next version stops reading it. A git worktree without its own section uses its main checkout's file and state. A worker started by `coord spawn` uses its coordinator's project, named by `COORD_LANE`, unless the repository it is in has its own. `init` lists the files it writes and refuses when any is outside the project. `-h` or `--help` after any verb only prints help, and an unknown flag is an error.
+
+| Key | Default | What it is |
+| --- | --- | --- |
+| `dbPath` | `.claude/tasks/tasks.db` | The database, relative to the project root (nearest folder with `.git` or `.claude`). |
+| `rolesFile` | `.claude/tasks/roles.toml` | Names and permission levels. Missing: everyone may do everything. |
 
 ## Usage
 
