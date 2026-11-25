@@ -7,8 +7,8 @@ The same file ships with coordinator, agent-bus and task-tracker (each plugin in
 - A git worktree without its own section in .claude/claude-mods.json uses its main checkout, where that file
   (usually untracked) and the project's state live.
 - A worker started by a coordinator carries COORD_LANE=<project root>#<role>. That hand-over names its project and wins
-  over the folder's own section and state, but only in that project's repository (its worktrees included) and in the
-  repository its lane record names (the project's `repos`, while there is no record). `init` never follows it.
+  over the folder's own section and state, for a mod the project uses, in that project's repository (its worktrees
+  included), in the repository its lane record names and in the project's `repos`. Nowhere else, and never for `init`.
 - A path that comes from the environment (the plugins' options arrive there) must lie in the project or its main
   checkout. Paths in the project's own file and typed flags may point anywhere.
 """
@@ -187,10 +187,9 @@ def handed_over(here, env=None):
         lane = lanes.get(role)
     except (OSError, ValueError, AttributeError):
         lane = None
+    repos = [r.strip() for r in str(coord.get('repos') or '').split(',') if r.strip()]
     if isinstance(lane, dict) and lane.get('repo'):
-        repos = [str(lane['repo'])]
-    else:  # not recorded (yet), as the usage watcher
-        repos = [r.strip() for r in str(coord.get('repos') or '').split(',') if r.strip()]
+        repos.append(str(lane['repo']))
     return p if any(same_place(here, (p / r).resolve()) for r in repos) else None
 
 
@@ -200,17 +199,22 @@ def resolve(section, state, start=None, env=None, init=False):
     def used(d):
         return section_of(d, section) is not None or (d / state).exists()
 
-    own = find_root(start)
-    top = git_top(own)
-    main = main_checkout(top) if top else None
-    if main and own != top and (main / own.relative_to(top)).is_dir() and is_project(main / own.relative_to(top)):
-        shared = main / own.relative_to(top)
-    else:
+    def located(own):
+        top = git_top(own)
+        main = main_checkout(top) if top else None
         shared = main
-    root = own
-    if section_of(own, section) is None and shared and (used(shared) or not used(own)):
-        root = shared
+        if main and own != top:
+            inner = main / own.relative_to(top)
+            shared = inner if inner.is_dir() and is_project(inner) else main
+        root = own
+        if section_of(own, section) is None and shared and (used(shared) or not used(own)):
+            root = shared
+        return Project(root, [p for p in (own, top, main) if p])
+
+    own = find_root(start)
     handed = None if init else handed_over(own, env)
-    if handed:
-        return Project(handed)
-    return Project(root, [p for p in (own, top, main) if p])
+    if handed:  # found from there as the coordinator itself finds it
+        theirs = located(handed)
+        if used(theirs.root):
+            return theirs
+    return located(own)
