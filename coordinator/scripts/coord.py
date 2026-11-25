@@ -906,20 +906,36 @@ def cmd_spawn(cfg, args):
         if alive:
             raise SystemExit(f'coordinator: an earlier {role} is still running (pids {alive}); stop it first')
     cmd = worker_command(cfg, role, brief, model)
-    handle, how = open_terminal(cfg, role, repo, cmd, dry)
     if dry:
+        open_terminal(cfg, role, repo, cmd, dry)
         return 0
+    # the record comes first: the worker's first command looks its repository up in it
+    before = lanes.get(role)
+    gen = (before or {}).get('generation', 0) + 1
+    lanes[role] = {'role': role, 'brief': brief, 'repo': repo, 'backend': cfg.backend, 'handle': None, 'state': 'live',
+                   'started': now(), 'generation': gen, 'model': model or cfg['workerModel']}
+    if coordinator:
+        lanes[role]['kind'] = 'coordinator'
+    save_lanes(cfg, lanes)
+    try:
+        handle, how = open_terminal(cfg, role, repo, cmd, dry)
+    except BaseException:
+        lanes = load_lanes(cfg)
+        if before is None:
+            lanes.pop(role, None)
+        else:
+            lanes[role] = before
+        save_lanes(cfg, lanes)
+        raise
     if handle and how in ('orca', 'herdr'):
         bus(cfg, 'register', role, '--handle', handle, '--kind', 'claude', '--mode', 'file')
     elif bus_cli() and cfg.path('busDir').is_dir():
         bus(cfg, 'register', role, '--kind', 'claude', '--mode', 'file')
-    gen = lanes.get(role, {}).get('generation', 0) + 1
-    lanes[role] = {'role': role, 'brief': brief, 'repo': repo, 'backend': how, 'handle': handle, 'state': 'live',
-                   'started': now(), 'generation': gen, 'model': model or cfg['workerModel']}
+    opened = lanes[role]
+    lanes = load_lanes(cfg)
+    lanes[role] = {**opened, **lanes.get(role, {}), 'backend': how, 'handle': handle}
     if how == 'herdr' and handle in HERDR_OPENED:
         lanes[role].update({k: v for k, v in HERDR_OPENED[handle].items() if v})
-    if coordinator:
-        lanes[role]['kind'] = 'coordinator'
     save_lanes(cfg, lanes)
     print(f'{role}: started (generation {gen}, {how}{" " + handle if handle else ""}) on {brief}')
     return 0
