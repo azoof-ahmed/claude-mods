@@ -85,6 +85,7 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
             project = data.get(SECTION, {}) if isinstance(data, dict) else {}
         except (OSError, ValueError) as e:
             raise SystemExit(f'error: {pf} is not valid JSON: {e}')
+    old = projects.old_options(SECTION, PATHS, env)
     values, sources = {}, {}
     for key, default in DEFAULTS.items():
         if flags.get(key) is not None:
@@ -95,6 +96,8 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
             sources[key] = 'project'
         elif env.get(ENV[key]) is not None and (env[ENV[key]] or key not in PATHS):
             values[key], sources[key] = env[ENV[key]], 'env'
+        elif key in old:
+            values[key], sources[key] = old[key], 'env'
         else:
             values[key], sources[key] = default, 'default'
 

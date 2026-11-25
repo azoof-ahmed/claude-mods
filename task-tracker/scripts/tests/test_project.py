@@ -148,6 +148,21 @@ class TaskPathsTest(Places):
         self.assertIn('dbPath comes from a plugin option', err)
         self.assertEqual(self.where(self.beta, TASKS_DB='')['db'], str(self.beta / '.claude/tasks/tasks.db'))
 
+    def old_option(self, name, **options):
+        (self.home / '.claude' / 'settings.json').write_text(json.dumps({'pluginConfigs': {name: {'options': options}}}))
+
+    def test_old_options_warn_inside_and_are_refused_outside(self):
+        for name in ('task-tracker', 'task-tracker@claude-mods'):
+            self.old_option(name, dbPath='x/t.db')
+            code, out, err = self.cli(self.beta, 'where')
+            self.assertEqual(code, 0)
+            self.assertIn(str(self.beta / 'x' / 't.db'), out)
+            self.assertIn('dbPath comes from a plugin option', err)
+            self.old_option(name, dbPath=str(self.alpha / 't.db'))
+            code, _, err = self.unchanged(self.beta, 'init')
+            self.assertEqual(code, 2)
+            self.assertIn('refusing dbPath', err)
+
     def test_init_lists_its_files_and_refuses_any_outside(self):
         code, out, _ = self.cli(self.beta, 'init')
         self.assertEqual(code, 0)

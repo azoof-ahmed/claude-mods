@@ -90,8 +90,6 @@ async function exportEnv($: $T): Promise<void> {
   const v = cfg.env
   await $.env.set('TASKS_CLI', scriptPath($))
   await $.env.set('TASKS_PREFIX', v.TASKS_PREFIX)
-  if (v.TASKS_DB) await $.env.set('TASKS_DB', v.TASKS_DB)
-  if (v.TASKS_ROLES) await $.env.set('TASKS_ROLES', v.TASKS_ROLES)
   await $.env.set('TASKS_LABELS', v.TASKS_LABELS)
   await $.env.set('TASKS_IMPORTERS', v.TASKS_IMPORTERS)
   await $.env.set('TASKS_NOTIFY_CMD', v.TASKS_NOTIFY_CMD)
@@ -217,9 +215,6 @@ export const register: Register = (on, options) => {
   cfg.refreshMs = Math.max(0, Number(options.refreshSeconds ?? 3)) * 1000
   cfg.env = {
     TASKS_PREFIX: opt(options, 'idPrefix'),
-    // paths belong to one project: no longer offered as options, and still passed on for one version
-    ...(opt(options, 'dbPath') ? { TASKS_DB: opt(options, 'dbPath') } : {}),
-    ...(opt(options, 'rolesFile') ? { TASKS_ROLES: opt(options, 'rolesFile') } : {}),
     TASKS_LABELS: opt(options, 'labels'),
     TASKS_IMPORTERS: opt(options, 'importers'),
     TASKS_NOTIFY_CMD: opt(options, 'notifyCommand'),

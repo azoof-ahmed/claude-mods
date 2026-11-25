@@ -103,6 +103,24 @@ class Project:
                           + '\n  '.join(out) + f'\nRun init in the project they belong to, or change its paths in {self.file}.')
 
 
+def old_options(section, keys, env=None):
+    """Path options left in the user's settings (pluginConfigs["<mod>"] or ["<mod>@<marketplace>"]). The plugins no
+    longer declare them, so Claude Code does not hand them over; read for one more version, checked like the
+    environment."""
+    env = os.environ if env is None else env
+    base = env.get('HOME') or env.get('USERPROFILE')
+    folder = env.get('CLAUDE_CONFIG_DIR') or (base and os.path.join(base, '.claude'))
+    out = {}
+    try:
+        configs = json.loads((Path(folder) / 'settings.json').read_text(encoding='utf-8'))['pluginConfigs']
+        for name, conf in configs.items():
+            if name.split('@')[0] == section:
+                out.update({k: v for k, v in (conf.get('options') or {}).items() if k in keys and v and isinstance(v, str)})
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return out
+
+
 def section_of(root, section):
     """The section of root's claude-mods.json, or None."""
     try:

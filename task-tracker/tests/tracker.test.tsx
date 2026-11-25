@@ -86,6 +86,7 @@ test('runs the bundled CLI with the options as environment, and tells the model 
   expect(first?.env.TASKS_PREFIX).toBe('WEB')
   expect(first?.argv.includes('--prefix')).toBe(false)
   expect(envSet.TASKS_PREFIX).toBe('WEB')
+  expect(envSet.TASKS_DB).toBeUndefined() // paths are the project's, never options
   expect(String(envSet.TASKS_CLI).endsWith('/scripts/task.py')).toBe(true)
 
   const r = await $.classic.SessionStart({ source: 'startup' })
