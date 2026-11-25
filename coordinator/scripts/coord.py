@@ -142,8 +142,9 @@ class Config(dict):
         self.root = self.project.root
         self.file = self.project.file
         from_env = set()
+        old = project.old_options('coordinator', PATHS + ('repos',))
         for k in DEFAULTS:
-            v = os.environ.get(env_key(k))
+            v = os.environ.get(env_key(k)) or old.get(k)
             if v:
                 self[k] = v
                 from_env.add(k)

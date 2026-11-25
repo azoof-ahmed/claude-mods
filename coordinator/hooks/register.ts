@@ -167,29 +167,6 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Bash children (the model's own coord.py runs, shell workers it starts) inherit these.
     await $.env.set('COORD_CLI', `${$.plugin.root}/scripts/coord.py`)
-    // Paths belong to one project: no longer offered as options, and still passed on for one version.
-    const given: Readonly<Record<string, unknown>> = options
-    if (str(given.repos, '') !== '') {
-      await $.env.set('COORD_REPOS', str(given.repos, ''))
-    }
-    if (str(given.busDir, '') !== '') {
-      await $.env.set('COORD_BUS_DIR', str(given.busDir, ''))
-    }
-    if (str(given.trackerDb, '') !== '') {
-      await $.env.set('COORD_TRACKER_DB', str(given.trackerDb, ''))
-    }
-    if (str(given.rulesFile, '') !== '') {
-      await $.env.set('COORD_RULES_FILE', str(given.rulesFile, ''))
-    }
-    if (str(given.briefsDir, '') !== '') {
-      await $.env.set('COORD_BRIEFS_DIR', str(given.briefsDir, ''))
-    }
-    if (str(given.cardsDir, '') !== '') {
-      await $.env.set('COORD_CARDS_DIR', str(given.cardsDir, ''))
-    }
-    if (str(given.reportsDir, '') !== '') {
-      await $.env.set('COORD_REPORTS_DIR', str(given.reportsDir, ''))
-    }
     await $.env.set('COORD_BACKEND', str(options.backend, 'manual'))
     await $.env.set('COORD_SHELL', str(options.shell, 'auto'))
     await $.env.set('COORD_WORKER_COMMAND', str(options.workerCommand, 'claude --model {model} "{prompt}"'))

@@ -158,6 +158,24 @@ class CoordPathsTest(Places):
         self.assertIn('busDir comes from a plugin option', err)
         self.assertEqual(self.config(self.beta, COORD_BUS_DIR='.claude/bus')[2], '')
 
+    def old_option(self, name, **options):
+        (self.home / '.claude' / 'settings.json').write_text(json.dumps({'pluginConfigs': {name: {'options': options}}}))
+
+    def test_old_options_warn_inside_and_are_refused_outside(self):
+        for name in ('coordinator', 'coordinator@claude-mods'):
+            self.old_option(name, busDir='tmp/bus')
+            code, cfg, err = self.config(self.beta)
+            self.assertEqual((code, cfg['busDir']), (0, 'tmp/bus'))
+            self.assertIn('busDir comes from a plugin option', err)
+            self.old_option(name, cardsDir=str(self.alpha / 'cards'), maxLanes=1)
+            code, _, err = self.unchanged(self.beta, 'init')
+            self.assertEqual(code, 2)
+            self.assertIn('refusing cardsDir', err)
+        self.section(self.beta, 'coordinator', cardsDir='mine')
+        self.assertEqual(self.config(self.beta)[1]['cardsDir'], 'mine')
+        self.old_option('another', cardsDir=str(self.alpha / 'cards'))
+        self.assertEqual(self.config(self.alpha)[2], '')
+
     def test_the_project_file_may_point_anywhere(self):
         self.section(self.beta, 'coordinator', busDir=str(self.alpha / 'bus'))
         code, cfg, err = self.config(self.beta, COORD_BUS_DIR=str(self.home / 'elsewhere'))

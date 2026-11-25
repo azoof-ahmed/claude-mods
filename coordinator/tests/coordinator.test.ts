@@ -1,5 +1,5 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import { contextLines, retireReminder, usageNotes, type CoordContext } from '../hooks/register'
 
 const BASE: CoordContext = {
@@ -88,4 +88,21 @@ test('no weekly note while a pause is already running', async () => {
 test('everyone checkpoints at the session threshold', async () => {
   const r = usageNotes([{ kind: 'five_hour', percentUsed: 98 }], { ...BASE, isCoordinator: false }, new Set())
   expect(r.notes[0]).toContain('Checkpoint')
+})
+
+test('session start exports no path: paths are the project\'s, never options', async ($, on) => {
+  mock.env(on, {})
+  mock.clock(on)
+  const env: Record<string, string | undefined> = {}
+  on('env.set', ($, e) => {
+    env[e.name] = e.value
+    return { value: undefined }
+  })
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+
+  expect(env.COORD_BACKEND).toBe('manual')
+  expect(env.COORD_BUS_DIR).toBeUndefined()
 })

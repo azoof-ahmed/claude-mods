@@ -16,7 +16,7 @@ import coord  # noqa: E402
 REAL_HERDR_PANES = coord.herdr_panes
 
 CLEAN = {coord.env_key(k): '' for k in coord.DEFAULTS}
-CLEAN.update({'AGENT_BUS_ROLE': '', 'COORD_LANE': '', 'AGENT_BUS_CLI': os.devnull + '-missing',
+CLEAN.update({'AGENT_BUS_ROLE': '', 'COORD_LANE': '', 'CLAUDE_CONFIG_DIR': os.devnull, 'AGENT_BUS_CLI': os.devnull + '-missing',
               # the tests run inside Orca, herdr or tmux: none of that may leak into `auto`
               'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
 
