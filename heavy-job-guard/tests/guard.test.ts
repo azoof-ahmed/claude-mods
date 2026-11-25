@@ -107,6 +107,68 @@ test('reads the Windows process table when ps is not available', async ($, on) =
   expect(JSON.stringify(answer)).toContain('pid 4242 (running 03:12)')
 })
 
+test('a tool server an agent keeps open is not a job', async ($, on) => {
+  answerPs(
+    on,
+    `${PS_IDLE}\n  869 06:00:00 npm exec @playwright/mcp@latest --output-dir x\n  892 06:00:00 node /x/.bin/playwright-mcp --output-dir x`,
+  )
+  let ran = false
+  on('tool.call', { tool: 'Bash' }, () => {
+    ran = true
+    return { result: { stdout: '', stderr: '', interrupted: false } }
+  })
+
+  await $.tool.call({ tool: 'Bash', command: 'bun run test' })
+
+  expect(ran).toBe(true)
+})
+
+for (const line of [
+  'node /x/node_modules/.bin/vitest run packages/foo-mcp',
+  'npx tsc -p packages/mcp',
+  'npm test -- my mcp server',
+  '/x/foo-mcp/node_modules/.bin/jest',
+  `/bin/zsh -c source ~/.snap.sh && eval 'npm test packages/mcp' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'cat <<E\\012x\\012E\\012npm test' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'echo '"'"'a'"'"'; npm test' < /dev/null && pwd -P`,
+  `bash -c npm test; eval 'ls'`,
+  'C:\\git tools\\node.exe C:\\x\\jest',
+  '/home/a/cat dir/node_modules/.bin/jest',
+]) {
+  test(`a running job counts: ${line}`, async ($, on) => {
+    answerPs(on, `${PS_IDLE}\n  900 01:00 ${line}`)
+    let ran = false
+    on('tool.call', { tool: 'Bash' }, () => {
+      ran = true
+      return { result: { stdout: '', stderr: '', interrupted: false } }
+    })
+
+    await $.tool.call({ tool: 'Bash', command: 'bun run test' })
+
+    expect(ran).toBe(false)
+  })
+}
+
+for (const line of [
+  'npx -y @playwright/mcp@latest',
+  'npx playwright run-mcp-server',
+  'grep -rn vitest .',
+  `/bin/zsh -c source ~/.snap.sh && eval 'git commit -m "npm test passes"' < /dev/null && pwd -P`,
+]) {
+  test(`not a running job: ${line}`, async ($, on) => {
+    answerPs(on, `${PS_IDLE}\n  900 01:00 ${line}`)
+    let ran = false
+    on('tool.call', { tool: 'Bash' }, () => {
+      ran = true
+      return { result: { stdout: '', stderr: '', interrupted: false } }
+    })
+
+    await $.tool.call({ tool: 'Bash', command: 'bun run test' })
+
+    expect(ran).toBe(true)
+  })
+}
+
 test('formats elapsed seconds like ps', async () => {
   expect(etime(5)).toBe('00:05')
   expect(etime(3725)).toBe('01:02:05')
