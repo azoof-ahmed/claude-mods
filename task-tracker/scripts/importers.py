@@ -168,6 +168,8 @@ class Importer:
 
 def run_all(conn, actor, only=None, dry=False) -> dict:
     entries = cfg().importers
+    if cfg().importers_refused:
+        raise TaskError(cfg().importers_refused)
     if not entries:
         raise TaskError('no importers configured: set the `importers` option, TASKS_IMPORTERS or --importers '
                         '(comma-separated .py files, module names or commands; see importers.py)')

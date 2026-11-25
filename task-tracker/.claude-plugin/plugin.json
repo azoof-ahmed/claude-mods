@@ -1,6 +1,6 @@
 {
   "name": "task-tracker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A shared task tracker for agents and people working in one repository: claim tasks, declare the files you touch, get refused on overlaps, review. /tasks board pane, status line, a band for conflicts and reviews, toasts for blocked tasks.",
   "author": {
     "name": "Azoof Ahmed"
@@ -25,18 +25,6 @@
       "title": "Task id prefix",
       "description": "Task ids read <prefix>-<n>, e.g. TASK-12.",
       "default": "TASK"
-    },
-    "dbPath": {
-      "type": "string",
-      "title": "Database path",
-      "description": "The SQLite file, relative to the project root (nearest folder with .git or .claude).",
-      "default": ".claude/tasks/tasks.db"
-    },
-    "rolesFile": {
-      "type": "string",
-      "title": "Roles file",
-      "description": "TOML file of names and permission levels, relative to the project root. Missing: everyone may do everything. `task.py init` writes a template.",
-      "default": ".claude/tasks/roles.toml"
     },
     "labels": {
       "type": "string",

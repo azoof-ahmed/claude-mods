@@ -95,6 +95,11 @@ def _labels(a):
 # ------------------------------------------------------------------------------------------------ commands
 
 def cmd_init(conn, me, a):
+    cf = db.cfg()
+    files = [cf.db_path] + ([cf.roles_path] if not a.no_roles and not cf.roles_path.exists() else [])
+    cf.project.refuse_outside('task-tracker', files)
+    if not a.json:
+        print('init writes: ' + ', '.join(str(f) for f in files), flush=True)
     res = db.init(write_roles=not a.no_roles)
     if a.json:
         return out_json(res)
@@ -477,7 +482,7 @@ def cmd_export(conn, me, a):
 # ------------------------------------------------------------------------------------------------ parser
 
 def build_parser():
-    p = argparse.ArgumentParser(prog='task.py', description=__doc__.split('\n')[0],
+    p = argparse.ArgumentParser(prog='task.py', allow_abbrev=False, description=__doc__.split('\n')[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     p.add_argument('--as', dest='as_name', help='act as this name (default $TASKS_AS, else "user")')
     p.add_argument('--db', help='tracker database (default .claude/tasks/tasks.db under the project root)')
@@ -489,7 +494,7 @@ def build_parser():
     sub = p.add_subparsers(dest='cmd', required=True)
 
     def sp(name, fn, help, read=False):
-        s = sub.add_parser(name, help=help)
+        s = sub.add_parser(name, help=help, allow_abbrev=False)
         s.set_defaults(fn=fn, read=read)
         s.add_argument('--json', action='store_true')
         return s
@@ -630,12 +635,23 @@ def build_parser():
 def configure_from_args(a, env=None):
     flags = {'dbPath': a.db, 'rolesFile': a.roles, 'idPrefix': a.prefix, 'labels': a.labels,
              'importers': a.importers, 'notifyCommand': a.notify_cmd}
-    return db.configure(config.load(flags, env=env))
+    return db.configure(config.load(flags, env=env, init=getattr(a, 'cmd', None) == 'init'))
+
+
+def free_text(argv):
+    """`comment ID run ls -h`: -h after the text has begun is a word of it, so a `--` is put before the text."""
+    for i, a in enumerate(argv):
+        if a == 'comment':
+            rest = argv[i + 1:]
+            if len(rest) > 2 and not any(x.startswith('-') for x in rest[:2]) and {'-h', '--help'} & set(rest[2:]):
+                return argv[:i + 2] + ['--'] + rest[1:]
+            break
+    return argv
 
 
 def main(argv=None):
     _enc_safe()
-    a = build_parser().parse_args(argv)
+    a = build_parser().parse_args(free_text(list(sys.argv[1:] if argv is None else argv)))
     try:
         configure_from_args(a)
         me = db.resolve_actor(a.as_name)
@@ -646,6 +662,9 @@ def main(argv=None):
             if conn is not None:
                 conn.close()
         return 0
+    except config.Refused as e:
+        print(c(f'error: {e}', '31'), file=sys.stderr)
+        return 2
     except Denied as e:
         print(c(str(e), '31'), file=sys.stderr)
         return 3

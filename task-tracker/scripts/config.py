@@ -11,7 +11,8 @@ Resolution order, highest first:
 The project file beats the environment: a project's own settings win over one user's plugin options.
 
 The project root is the nearest ancestor of the working directory holding .git or .claude, else the working
-directory. Relative paths (dbPath, rolesFile, an importer's .py path) resolve against the project root.
+directory (see project.py: a git worktree without its own section uses its main checkout, a coordinator's worker uses
+the coordinator's project). The environment may not point dbPath or rolesFile outside the project. Relative paths (dbPath, rolesFile, an importer's .py path) resolve against the project root.
 """
 from __future__ import annotations
 
@@ -20,6 +21,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
+
+import project as projects
+from project import Refused, find_root  # noqa: F401
 
 DEFAULTS = {
     'idPrefix': 'TASK',
@@ -39,16 +43,8 @@ ENV = {
     'notifyCommand': 'TASKS_NOTIFY_CMD',
 }
 
-PROJECT_FILE = Path('.claude') / 'claude-mods.json'
 SECTION = 'task-tracker'
-
-
-def find_root(start: Optional[Path] = None) -> Path:
-    start = Path(start or os.getcwd()).resolve()
-    for p in [start, *start.parents]:
-        if (p / '.git').exists() or (p / '.claude').is_dir():
-            return p
-    return start
+PATHS = ('dbPath', 'rolesFile')
 
 
 def _split(s: str) -> List[str]:
@@ -65,6 +61,8 @@ class Config:
     importers: List[str] = field(default_factory=list)
     notify_command: str = ''
     sources: dict = field(default_factory=dict)
+    project: Optional[projects.Project] = None
+    importers_refused: str = ''
 
     def as_dict(self) -> dict:
         return {'root': str(self.root), 'db': str(self.db_path), 'db_exists': self.db_path.exists(),
@@ -73,19 +71,22 @@ class Config:
                 'sources': self.sources}
 
 
-def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional[Path] = None) -> Config:
+def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional[Path] = None,
+         init: bool = False) -> Config:
     """flags: {option name: value or None}, keyed like DEFAULTS."""
     flags = flags or {}
     env = os.environ if env is None else env
-    root = find_root(cwd)
+    proj = projects.resolve(SECTION, Path(DEFAULTS['dbPath']), cwd, env, init)
+    root = proj.root
     project = {}
-    pf = root / PROJECT_FILE
+    pf = proj.file
     if pf.exists():
         try:
             data = json.loads(pf.read_text(encoding='utf-8'))
             project = data.get(SECTION, {}) if isinstance(data, dict) else {}
         except (OSError, ValueError) as e:
             raise SystemExit(f'error: {pf} is not valid JSON: {e}')
+    old = projects.old_options(SECTION, PATHS, env)
     values, sources = {}, {}
     for key, default in DEFAULTS.items():
         if flags.get(key) is not None:
@@ -94,10 +95,24 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
             v = project[key]
             values[key] = ','.join(v) if isinstance(v, list) else str(v)
             sources[key] = 'project'
-        elif env.get(ENV[key]) is not None:
+        elif env.get(ENV[key]) is not None and (env[ENV[key]] or key not in PATHS):
             values[key], sources[key] = env[ENV[key]], 'env'
+        elif key in old:
+            values[key], sources[key] = old[key], 'env'
         else:
             values[key], sources[key] = default, 'default'
+
+    for key in PATHS:
+        if sources[key] == 'env':
+            proj.check_env('task-tracker', SECTION, key, ENV[key], values[key], DEFAULTS[key],
+                           {'dbPath': '--db', 'rolesFile': '--roles'}[key])
+    refused = ''
+    if sources['importers'] == 'env':  # only `import` runs them, so only `import` is refused
+        for entry in _split(values['importers']):
+            if entry.endswith('.py') and not any(c.isspace() for c in entry) and not proj.holds(entry):
+                refused = (f'task-tracker: refusing the importer {entry} (the importers plugin option, or '
+                           f'{ENV["importers"]} in the environment): it is outside this project ({root}). Set '
+                           f'"importers" in the "{SECTION}" section of {pf}.')
 
     def path(v: str) -> Path:
         p = Path(os.path.expanduser(v))
@@ -106,4 +121,5 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
     prefix = values['idPrefix'].strip().rstrip('-') or DEFAULTS['idPrefix']
     return Config(root=root, db_path=path(values['dbPath']), roles_path=path(values['rolesFile']), prefix=prefix,
                   labels=_split(values['labels']), importers=_split(values['importers']),
-                  notify_command=values['notifyCommand'].strip(), sources=sources)
+                  notify_command=values['notifyCommand'].strip(), sources=sources, project=proj,
+                  importers_refused=refused)
