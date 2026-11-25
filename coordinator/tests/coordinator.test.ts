@@ -31,6 +31,12 @@ test('an uncoordinated project gets no context', async ($, on) => {
   expect(r.additionalContext ?? []).toEqual([])
 })
 
+test('a refused path is shown and adds no context', async ($, on) => {
+  answerContext(on, { configured: false, refused: 'coordinator: refusing busDir=/a' } as CoordContext)
+  const r = await $.classic.SessionStart({ source: 'startup' } as never)
+  expect(r.additionalContext ?? []).toEqual([])
+})
+
 test('the coordinator session is told the lanes and the open questions', async ($, on) => {
   answerContext(on, { ...BASE, questions: 2 })
   const r = await $.classic.SessionStart({ source: 'startup' } as never)

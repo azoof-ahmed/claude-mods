@@ -23,7 +23,9 @@
     python coord.py config                              the resolved configuration
 
 Configuration (first match wins): flags > <project>/.claude/claude-mods.json "coordinator" > environment
-(COORD_<KEY>; the plugin's options arrive this way) > defaults. Keys: see DEFAULTS. `init` writes the resolved
+(COORD_<KEY>; the plugin's options arrive this way) > defaults. Paths (busDir, cardsDir, ..., repos) belong to one
+project: the environment may not point them outside it. A git worktree without its own section uses its main
+checkout's; a worker (COORD_LANE, set by spawn) uses its coordinator's project. Keys: see DEFAULTS. `init` writes the resolved
 values into the project file, so every worker, shell or not, shares them.
 """
 import json
@@ -36,6 +38,9 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import project  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE.parent / 'templates'
@@ -126,23 +131,22 @@ def env_key(k):
     return 'COORD_' + re.sub(r'(?<!^)(?=[A-Z])', '_', k).upper()
 
 
-def project_root(start=None):
-    here = Path(start or os.getcwd()).resolve()
-    for d in [here, *here.parents]:
-        if (d / '.git').exists() or (d / '.claude').is_dir():
-            return d
-    return here
+def find_project(start=None, init=False):
+    return project.resolve('coordinator', Path('.claude') / 'coord', start, init=init)
 
 
 class Config(dict):
     def __init__(self, root, flags=None):
         super().__init__(DEFAULTS)
-        self.root = root
-        self.file = root / '.claude' / 'claude-mods.json'
+        self.project = root if isinstance(root, project.Project) else project.Project(root)
+        self.root = self.project.root
+        self.file = self.project.file
+        from_env = set()
         for k in DEFAULTS:
             v = os.environ.get(env_key(k))
             if v:
                 self[k] = v
+                from_env.add(k)
         if self.file.exists():  # the project's own file beats the environment (the plugin's options arrive as env)
             try:
                 section = json.loads(self.file.read_text(encoding='utf-8')).get('coordinator') or {}
@@ -154,11 +158,17 @@ class Config(dict):
                         print(f'coordinator: {self.file}: unknown key "{k}" ignored; known keys: '
                               f'{", ".join(DEFAULTS)}', file=sys.stderr)
                 self.update({k: v for k, v in section.items() if k in DEFAULTS})
+                from_env -= set(section)
             except (ValueError, OSError, AttributeError) as ex:
                 print(f'coordinator: ignoring {self.file}: {ex}', file=sys.stderr)
         for k, v in (flags or {}).items():
             if v not in (None, ''):
                 self[k] = v
+                from_env.discard(k)
+        for k in PATHS + ('repos',):
+            if k in from_env:
+                for v in str(self[k]).split(',') if k == 'repos' else [self[k]]:
+                    self.project.check_env('coordinator', 'coordinator', k, env_key(k), v.strip(), DEFAULTS[k])
         for k in INTS:
             self[k] = int(self[k])
         for k in FLOATS + FLOATS_EXTRA:
@@ -800,7 +810,6 @@ def rel(cfg, p):
 def cmd_init(cfg, args):
     force = '--force' in args
     roles = take(args, '--roles') or 'coordinator,scheduler'
-    made = []
     targets = {
         TEMPLATES / 'RULES_CORE.md': cfg.path('rulesFile'),
         TEMPLATES / 'lanes' / 'README.md': cfg.path('cardsDir') / 'README.md',
@@ -809,6 +818,13 @@ def cmd_init(cfg, args):
         TEMPLATES / 'briefs' / 'scheduler.md': cfg.path('briefsDir') / 'scheduler.md',
         TEMPLATES / 'HANDOFF_PROTOCOL.md': cfg.path('briefsDir') / 'HANDOFF_PROTOCOL.md',
     }
+    files = [d for d in targets.values() if force or not d.exists()] + [questions_file(cfg), lanes_file(cfg), cfg.file]
+    cli = bus_cli()
+    if cli:
+        files.append(cfg.path('busDir'))
+    cfg.project.refuse_outside('coordinator', files)
+    print('coordinator init writes:\n  ' + '\n  '.join(str(f) for f in files), flush=True)
+    made = []
     for src, dst in targets.items():
         if dst.exists() and not force:
             continue
@@ -821,7 +837,6 @@ def cmd_init(cfg, args):
         save_lanes(cfg, {})
     cfg.save()
     made.append(rel(cfg, cfg.file) + ' (config)')
-    cli = bus_cli()
     if cli:
         r = subprocess.run(cli + ['--dir', str(cfg.path('busDir')), 'init', '--roles', roles], capture_output=True,
                            **TEXT, cwd=cfg.root)
@@ -1752,24 +1767,86 @@ VERBS = {
 }
 
 
+# What each verb takes: flags alone, and flags with a value. Anything else that looks like a flag is an error.
+FLAGS = {
+    'init': ('--force', '--roles='), 'spawn': ('--dry-run', '--coordinator', '--repo=', '--model='),
+    'retire': ('--close', '--dry-run'), 'respawn': ('--dry-run',), 'lanes': ('--json',),
+    'close-idle': ('--dry-run',), 'reap': ('--dry-run',), 'ask': ('--from=', '--options='), 'questions': ('--all',),
+    'preflight': ('--min-ram-gb=', '--min-battery=', '--max-user-idle-s='),
+    'usage': ('--probe', '--json', '--debug', '--dry-run'),
+    'usage-watch': ('--start', '--once', '--probe', '--debug', '--dry-run'),
+    'pause': ('--tick', '--wait', '--now', '--dry-run'), 'paused': ('--role=',), 'resume': ('--dry-run',),
+    'record-usage': ('--alert', '--week=', '--session=', '--source='),
+}
+GLOBAL_FLAGS = ('--backend=', '--repos=', '--worker-model=', '--max-lanes=')
+FLAG_RE = re.compile(r'-[A-Za-z]|--[A-Za-z][\w-]*(=.*)?', re.S)
+
+
+def flag_error(verb, args):
+    """Why these arguments are refused, or None."""
+    known = FLAGS.get(verb, ()) + GLOBAL_FLAGS
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a + '=' in known:
+            if i + 1 >= len(args):
+                return f'{a} needs a value'
+            i += 1
+        elif FLAG_RE.fullmatch(a) and a not in known:
+            return f'unknown flag {a}'
+        i += 1
+    return None
+
+
+def verb_help(verb):
+    """The lines of the usage text for one verb."""
+    out, on = [], False
+    for ln in __doc__.splitlines():
+        if ln.startswith('    python coord.py '):
+            on = ln.split()[2] == verb
+        elif not ln.startswith('     '):
+            on = False
+        if on:
+            out.append(ln)
+    return '\n'.join(out) or __doc__
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in ('-h', '--help', 'help'):
         print(__doc__)
         return 0
+    if '-h' in args or '--help' in args:  # before anything is read or written
+        verb = next((a for a in args if a in VERBS or a == 'config'), None)
+        print(verb_help(verb) if verb else __doc__)
+        return 0
+    bad = flag_error(next((a for a in args if a in VERBS), ''), args)
+    if bad:
+        print(f'coordinator: {bad} (--help lists the flags)', file=sys.stderr)
+        return 2
     flags = {}
     for k in ('backend', 'repos', 'workerModel', 'maxLanes'):
         v = take(args, '--' + re.sub(r'(?<!^)(?=[A-Z])', '-', k).lower())
         if v:
             flags[k] = v
-    cfg = Config(project_root(), flags)
+    if not args:
+        print(__doc__)
+        return 2
     verb = args.pop(0)
+    if verb not in VERBS and verb != 'config':
+        print(f'coordinator: unknown verb {verb!r}\n' + __doc__, file=sys.stderr)
+        return 2
+    try:
+        cfg = Config(find_project(init=verb == 'init'), flags)
+    except project.Refused as ex:
+        if verb == 'context':  # the plugin's session start: it shows why and stays out of the way
+            print(json.dumps({'configured': False, 'refused': str(ex)}))
+            return 0
+        print(ex, file=sys.stderr)
+        return 2
     if verb == 'config':
         print(json.dumps({k: cfg[k] for k in DEFAULTS}, indent=1))
         return 0
-    if verb not in VERBS:
-        print(f'coordinator: unknown verb {verb!r}\n' + __doc__, file=sys.stderr)
-        return 2
     return VERBS[verb](cfg, args)
 
 

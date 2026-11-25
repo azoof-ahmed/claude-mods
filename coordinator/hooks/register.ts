@@ -15,7 +15,20 @@ export type CoordContext = {
   pauseWeeklyPercent: number
   pause: string | null
   maxLanes: number
+  /** Why coord.py refused a setting (a path outside this project), when it did. */
+  refused?: string
 }
+
+/** Options that named one project's paths. No longer offered; still passed on for one version. */
+const OLD_PATH_OPTIONS = {
+  repos: 'COORD_REPOS',
+  busDir: 'COORD_BUS_DIR',
+  trackerDb: 'COORD_TRACKER_DB',
+  rulesFile: 'COORD_RULES_FILE',
+  briefsDir: 'COORD_BRIEFS_DIR',
+  cardsDir: 'COORD_CARDS_DIR',
+  reportsDir: 'COORD_REPORTS_DIR',
+} as const
 
 const USAGE_EVERY_CALLS = 10
 const RETIRE_STEP = 0.1 // remind again every further 10% past the threshold
@@ -165,7 +178,13 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Bash children (the model's own coord.py runs, shell workers it starts) inherit these.
     await $.env.set('COORD_CLI', `${$.plugin.root}/scripts/coord.py`)
-    await $.env.set('COORD_REPOS', str(options.repos, '.'))
+    const given: Readonly<Record<string, unknown>> = options
+    for (const [key, name] of Object.entries(OLD_PATH_OPTIONS)) {
+      const value = str(given[key], '')
+      if (value !== '') {
+        await $.env.set(name, value)
+      }
+    }
     await $.env.set('COORD_BACKEND', str(options.backend, 'manual'))
     await $.env.set('COORD_SHELL', str(options.shell, 'auto'))
     await $.env.set('COORD_WORKER_COMMAND', str(options.workerCommand, 'claude --model {model} "{prompt}"'))
@@ -179,12 +198,6 @@ export const register: Register = (on, options) => {
     await $.env.set('COORD_PROBE_COMMAND', str(options.probeCommand, 'claude --model haiku'))
     await $.env.set('COORD_PAUSE_REMINDER_MIN', String(num(options.pauseReminderMin, 10)))
     await $.env.set('COORD_PAUSE_GRACE_MIN', String(num(options.pauseGraceMin, 20)))
-    await $.env.set('COORD_BUS_DIR', str(options.busDir, '.claude/bus'))
-    await $.env.set('COORD_TRACKER_DB', str(options.trackerDb, '.claude/tasks/tasks.db'))
-    await $.env.set('COORD_RULES_FILE', str(options.rulesFile, '.claude/coord/RULES_CORE.md'))
-    await $.env.set('COORD_BRIEFS_DIR', str(options.briefsDir, '.claude/coord/briefs'))
-    await $.env.set('COORD_CARDS_DIR', str(options.cardsDir, '.claude/coord/lanes'))
-    await $.env.set('COORD_REPORTS_DIR', str(options.reportsDir, '.claude/coord/reports'))
     await $.env.set('COORD_MIN_FREE_RAM_GB', String(num(options.minFreeRamGb, 4)))
     await $.env.set('COORD_MIN_BATTERY', String(num(options.minBattery, 40)))
     await $.command.register({
@@ -229,6 +242,10 @@ export const register: Register = (on, options) => {
     const c = await readContext($, python)
     ctx = c ?? ctx
     if (c === undefined) {
+      return result
+    }
+    if (c.refused !== undefined) {
+      $.ui.toast(c.refused)
       return result
     }
     const lines = contextLines(c, cliFor(python, $.plugin.root))

@@ -1,18 +1,12 @@
 {
   "name": "coordinator",
-  "version": "0.2.10",
+  "version": "0.3.0",
   "description": "Run many worker agents from one coordinator session: scaffolded rules, lane cards and briefs, spawn/retire/respawn workers in orca, herdr, tmux, Windows Terminal or by hand, a scheduler worker for heavy jobs, a question queue, status reports, token-economy reminders, and a usage watcher with a graceful pause and resume.",
   "author": {
     "name": "Azoof Ahmed"
   },
   "license": "MIT",
   "userConfig": {
-    "repos": {
-      "type": "string",
-      "title": "Repositories",
-      "description": "Comma-separated repo paths workers start in (relative to the project root). The first is the default for spawn.",
-      "default": "."
-    },
     "backend": {
       "type": "string",
       "title": "Worker terminal backend",
@@ -104,42 +98,6 @@
       "title": "Pause: interrupt after (minutes)",
       "description": "A lane still silent this long after the pause request is interrupted and its terminal closed; its card is what it last wrote.",
       "default": 20
-    },
-    "busDir": {
-      "type": "string",
-      "title": "Bus directory",
-      "description": "The agent-bus directory (used when the agent-bus plugin is installed).",
-      "default": ".claude/bus"
-    },
-    "trackerDb": {
-      "type": "string",
-      "title": "Task tracker database",
-      "description": "The task-tracker SQLite db; lanes show their in-progress tasks from it when it exists.",
-      "default": ".claude/tasks/tasks.db"
-    },
-    "rulesFile": {
-      "type": "string",
-      "title": "Rules file",
-      "description": "The short rules-core file every worker reads first.",
-      "default": ".claude/coord/RULES_CORE.md"
-    },
-    "briefsDir": {
-      "type": "string",
-      "title": "Briefs directory",
-      "description": "Where briefs, the resume brief, the scheduler brief and the handoff protocol live.",
-      "default": ".claude/coord/briefs"
-    },
-    "cardsDir": {
-      "type": "string",
-      "title": "Lane cards directory",
-      "description": "Where lane cards (one per role, the handoff) and lanes.json live.",
-      "default": ".claude/coord/lanes"
-    },
-    "reportsDir": {
-      "type": "string",
-      "title": "Reports directory",
-      "description": "Progress logs, the question queue, and the fallback for messages without the bus.",
-      "default": ".claude/coord/reports"
     },
     "minFreeRamGb": {
       "type": "number",
