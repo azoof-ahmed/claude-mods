@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { isLight, isShell, startsHeavy } from './shell'
+import { judgeProcess, startsHeavy } from './shell'
 
 type Job = { pid: number; elapsed: string; command: string }
 
@@ -78,10 +78,29 @@ async function processList($: EngineInterface): Promise<string | undefined> {
     .join('\n')
 }
 
+/** A build daemon above this share of a CPU is working, not waiting for the next build. */
+const BUSY_CPU = 5
+
+/** Which of these processes use more than `BUSY_CPU`; one that can't be read counts as busy. */
+async function busy($: EngineInterface, pids: number[]): Promise<Set<number>> {
+  const ps = await $.process.run(['ps', '-o', 'pid=,pcpu=', '-p', pids.join(',')]).catch(() => undefined)
+  const cpu = new Map<number, number>()
+
+  for (const line of ps?.exitCode === 0 ? ps.stdout.split('\n') : []) {
+    const m = /^\s*(\d+)\s+([\d.]+)\s*$/.exec(line)
+
+    if (m !== null) {
+      cpu.set(Number(m[1]), Number(m[2]))
+    }
+  }
+
+  return new Set(pids.filter(pid => (cpu.get(pid) ?? Infinity) > BUSY_CPU))
+}
+
 /**
  * The heavy jobs running on the machine, parents first. Only a program counts (a compiler, a test
- * runner, gradle), never a shell or a waiting loop that only mentions one. Claude's own shell is
- * listed beside the program it started, because its command says what the job is.
+ * runner, gradle, a build daemon while it works), never a shell, a wrapper or a waiting loop that
+ * only mentions one. Claude's own shell counts when its script would start a job.
  */
 export async function runningJobs(
   $: EngineInterface,
@@ -95,7 +114,7 @@ export async function runningJobs(
   }
 
   const jobs: Job[] = []
-  let programs = 0
+  const daemons: Job[] = []
 
   for (const line of listing.split('\n')) {
     const match = /^\s*(\d+)\s+(\S+)\s+(.*)$/.exec(line)
@@ -107,17 +126,19 @@ export async function runningJobs(
 
     // Claude's shell holds a script; anything else is a program and its arguments
     const shell = unwrap(command)
-    const program = shell === undefined && pattern.test(command) && !isLight(command) && !isShell(command)
+    const kind = shell === undefined ? judgeProcess(command, pattern) : startsHeavy(shell.script, pattern) ? 'job' : 'no'
+    const job = { pid: Number(match[1]), elapsed: match[2] ?? '', command: shell?.script ?? command }
 
-    if (!program && (shell === undefined || !startsHeavy(shell.script, pattern))) {
-      continue
+    if (kind === 'job') {
+      jobs.push(job)
+    } else if (kind === 'daemon') {
+      daemons.push(job)
     }
-
-    programs += program ? 1 : 0
-    jobs.push({ pid: Number(match[1]), elapsed: match[2] ?? '', command: shell?.script ?? command })
   }
 
-  return programs === 0 ? [] : jobs.sort((a, b) => a.pid - b.pid)
+  const working = daemons.length === 0 ? new Set<number>() : await busy($, daemons.map(d => d.pid))
+
+  return [...jobs, ...daemons.filter(d => working.has(d.pid))].sort((a, b) => a.pid - b.pid)
 }
 
 export function describeJobs(jobs: readonly Job[]): string {

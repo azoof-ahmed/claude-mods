@@ -45,9 +45,12 @@ const SHELL_PROCESS = new Set('sh bash zsh dash ksh fish tcsh csh cmd powershell
 /** Commands whose arguments name files they write. */
 const WRITERS = new Set('tee cp mv ln install rsync scp'.split(' '))
 /** Commands that keep what they are given (a commit, a message) where the same program can print it back. */
-const STORES = new Set('git gh nicotine tmux claude codex'.split(' '))
+const STORES = new Set('git gh nicotine tmux claude codex pbcopy pbpaste xclip xsel wl-copy wl-paste clip'.split(' '))
 /** Files people read: nothing runs them unless told to by name. */
 const DOC = /\.(md|markdown|txt|text|log|rst|adoc|org|csv|tsv)$/i
+/** Files with a note's extension that a build tool reads by itself. */
+const TOOL_INPUT = /^(CMakeLists\.txt|(requirements|constraints)[\w.-]*\.txt|[\w.-]*\.in\.txt)$/i
+const isNote = (f: string) => DOC.test(f) && !TOOL_INPUT.test(base(f))
 const NOT_A_FILE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/
 /** Programs that run the command after their own options: which options take a value, and how many words come first. */
 const WRAPPERS: Record<string, { values: string; first?: number }> = {
@@ -65,9 +68,9 @@ const WRAPPERS: Record<string, { values: string; first?: number }> = {
   xargs: { values: 'InPLEJRSsda' },
 }
 const INTERPRETERS = /^(python[\d.]*|node|ruby|perl|php|deno)$/
-/** Anything in a program's text that could start a process or load other code. */
+/** Anything in a program's text that could start a process, load other code or write a file another command may run. */
 const STARTS_PROCESS =
-  /system|subprocess|popen|exec|spawn|child_process|shell|\bpty\b|import ?\(|__import__|importlib|runpy|ctypes|multiprocessing|require|eval|fork|%x|\bqx\b|Bun|Deno|asyncio|\bos\b|\bsh\b|bash|`|\$\(/i
+  /system|subprocess|popen|exec|spawn|child_process|shell|passthru|proc_|pcntl|\bpty\b|import ?\(|__import__|importlib|runpy|ctypes|multiprocessing|require|eval|fork|%x|\bqx\b|Bun|Deno|asyncio|\bos\b|\b(z|ba|da|k|fi|tc|c)?sh\b|open|write|file|copy|move|rename|link|`|\$\(/i
 /** Variables that decide which program runs, or name one to run. */
 const STEERS = /^(PATH|FPATH|HOME|ENV|BASH_ENV|ZDOTDIR|SHELL|XDG_\w+|GIT_\w+|LESS\w*|RIPGREP_\w+|\w*PAGER|\w*EDITOR|\w*BROWSER|IFS)\+?=/
 const ASSIGNS = /^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/
@@ -462,24 +465,36 @@ function safeTmux(args: Word[]): boolean {
 }
 
 function safeSsh(args: Word[]): boolean {
-  let at = 0
+  /** Skips options from `at`; -1 when one of them can run a command here. */
+  const options = (at: number): number => {
+    while (args[at]?.text.startsWith('-')) {
+      const t = args[at]?.text ?? ''
+      const takesValue = /^-[46AaCfGgKkMNnqsTtVvXxYy]*[BbcDEeIiJLlmOoPpQRSWw]$/.test(t)
+      const value = takesValue ? (args[at + 1]?.text ?? '') : t
 
-  while (args[at]?.text.startsWith('-')) {
-    const t = args[at]?.text ?? ''
-    const takesValue = /^-[46AaCfGgKkMNnqsTtVvXxYy]*[BbcDEeIiJLlmOoPpQRSWw]$/.test(t)
-    const value = takesValue ? (args[at + 1]?.text ?? '') : t
+      if (t.startsWith('--') || /^-\w*F/.test(t) || (/^-\w*o/.test(t) && /command|include|match/i.test(value))) {
+        return -1
+      }
 
-    if (t.startsWith('--') || /^-\w*F/.test(t) || /^-\w*o/.test(t) && /command|include|match/i.test(value)) {
-      return false
+      at += takesValue ? 2 : 1
     }
 
-    at += takesValue ? 2 : 1
+    return at
   }
 
+  const at = options(0)
   const host = args[at]
   const name = (host?.text ?? '').replace(/^ssh:\/\//, '').replace(/^.*@/, '')
 
-  return host !== undefined && literal(host) && /[a-z.]/i.test(name) && !/^(localhost|127\.|0|\[?::|ip6-)/i.test(name)
+  // ssh reads options after the host too, up to the remote command
+  return (
+    at >= 0 &&
+    options(at + 1) >= 0 &&
+    host !== undefined &&
+    literal(host) &&
+    /[a-z.]/i.test(name) &&
+    !/^(localhost|127\.|0|\[?::|ip6-)/i.test(name)
+  )
 }
 
 /** sed can run commands, so only printing, deleting and plain substitutions pass. */
@@ -578,7 +593,7 @@ function wrapped(words: Word[], { values, first = 0 }: { values: string; first?:
 }
 
 /** Whether a command is one that runs none of the text in the script. */
-function isText(words: Word[], heredoc: string, whole: string): boolean {
+function isText(words: Word[], heredoc: string, whole: string, fed = false): boolean {
   let at = 0
 
   while (at < words.length) {
@@ -639,10 +654,14 @@ function isText(words: Word[], heredoc: string, whole: string): boolean {
       return true
     }
 
-    const from = name === 'env' && args.some(w => /^-\w*S/.test(w.text)) ? undefined : wrapped(rest, WRAPPERS[name] ?? { values: '' })
+    const flags = args.slice(0, (wrapped(rest, WRAPPERS[name] ?? { values: '' }) ?? 1) - 1)
+    const shell = name === 'sudo' && flags.some(w => /^-\w*[si]/.test(w.text))
+    const from = (name === 'env' && args.some(w => /^-\w*S/.test(w.text))) || shell ? undefined : wrapped(rest, WRAPPERS[name] ?? { values: '' })
+    // what xargs reads becomes the command of a wrapper with none of its own
+    const feeds = fed || name === 'xargs'
 
     // with no command of their own these print, or (exec) redirect
-    return from !== undefined && (from >= rest.length ? name !== 'exec' : isText(rest.slice(from), '', whole))
+    return from !== undefined && (from >= rest.length ? name !== 'exec' && !fed : isText(rest.slice(from), '', whole, feeds))
   }
 
   if (name === 'find') {
@@ -763,6 +782,18 @@ function writes(words: Word[]): string[] {
 
   if (WRITERS.has(name) || (name === 'sed' && prog.some(w => /^(-[^-]*i|--in-place)/.test(w.text)))) {
     out.push(...args.map(fileOf))
+  } else if (name === 'sort') {
+    prog.forEach((w, k) => {
+      const m = /^(?:-\w*o|--output=?)(.*)$/.exec(w.text)
+
+      if (m !== null) {
+        out.push(m[1] !== '' ? (m[1] ?? '?') : fileOf(prog[k + 1] ?? w))
+      }
+    })
+  } else if (name === 'uniq') {
+    const files = prog.slice(1).filter(w => w.redirAt < 0 && (w.text === '-' || !w.text.startsWith('-')))
+
+    out.push(...files.slice(1, 2).map(fileOf))
   } else if (name === 'dd') {
     out.push(...args.filter(w => w.text.startsWith('of=')).map(w => fileOf(w).slice(3)))
   } else if (/^g?awk$/.test(name)) {
@@ -778,62 +809,94 @@ function names(words: Word[]): string[] {
   return words.map(w => base(w.redirAt < 0 ? w.text : w.text.slice(w.redirAt).replace(/^[<>]+[|&]?/, ''))).filter(n => n !== '' && n !== '-')
 }
 
+/** A file name with `*`, `?`, `[…]` or `{a,b}` as a test for the names it matches; plain names give undefined. */
+function glob(name: string): RegExp | undefined {
+  if (!/[*?[{]/.test(name)) {
+    return undefined
+  }
+
+  const body = name.replace(/[.+^$()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.').replace(/\{([^{}]*)\}/g, (_, alts: string) => `(${alts.split(',').join('|')})`)
+
+  try {
+    return new RegExp(`^${body}$`)
+  } catch {
+    return /^/
+  }
+}
+
 /**
  * Whether a command the script can't vouch for could be given text that names a heavy job. Text
  * travels by pipe, by being captured into another command's words, through files the script writes
  * (when a command names the file, or the file is one a tool may read by itself) and through what
- * git, nicotine and the like keep and print back. Text that goes none of those ways (a message,
- * a commit, a job handed to the build board, a note) reaches nothing, whatever else the script runs.
+ * git, nicotine, the clipboard and the like keep and print back. Text that goes none of those ways (a
+ * message, a commit, a job handed to the build board, a note) reaches nothing, whatever else the
+ * script runs. Each command is visited once.
  */
 function reaches(nodes: Node[], unknown: boolean[], mention: boolean[]): boolean {
-  const tainted = [...mention]
+  const tainted = nodes.map(() => false)
   const stores = nodes.map(n => STORES.has(nameOf(program(n.c.words)[0])))
   const written = nodes.map(n => writes(n.c.words))
-  const named = nodes.map(n => names(n.c.words))
-  const inner: number[][] = nodes.map(() => [])
+  const next: number[][] = nodes.map(() => [])
+  const readers = new Map<string, number[]>()
+  const globs: { test: RegExp; at: number }[] = []
   const files = new Set<string>()
+  const queue: number[] = []
   let kept = false
-  let changed = true
 
-  nodes.forEach((n, i) => inner[n.outer]?.push(i))
+  nodes.forEach((n, i) => {
+    // a pipe carries text to the next command; a substitution's output into its outer command
+    next[n.prev]?.push(i)
 
-  for (let round = 0; changed && round <= nodes.length + 1; round += 1) {
-    changed = false
+    if (n.outer >= 0) {
+      next[i]?.push(n.outer)
+    }
 
-    nodes.forEach((n, i) => {
-      if (tainted[i] === true) {
-        return
+    for (const f of names(n.c.words)) {
+      const test = glob(f)
+
+      if (test === undefined) {
+        readers.set(f, [...(readers.get(f) ?? []), i])
+      } else {
+        globs.push({ test, at: i })
       }
+    }
+  })
 
-      tainted[i] =
-        (n.prev >= 0 && tainted[n.prev] === true) ||
-        (inner[i] ?? []).some(k => tainted[k] === true) ||
-        (named[i] ?? []).some(f => files.has(f)) ||
-        (kept && stores[i] === true)
-      changed ||= tainted[i]
-    })
-
-    nodes.forEach((_, i) => {
-      if (tainted[i] !== true || unknown[i] === true) {
-        return
-      }
-
-      for (const f of written[i] ?? []) {
-        changed ||= !files.has(base(f))
-        files.add(base(f))
-      }
-
-      changed ||= stores[i] === true && !kept
-      kept ||= stores[i] === true
-    })
+  const taint = (i: number) => {
+    if (i >= 0 && tainted[i] !== true) {
+      tainted[i] = true
+      queue.push(i)
+    }
   }
 
-  return (
-    // bounded above; if it ever ran out, say so the safe way
-    changed ||
-    tainted.some((t, i) => t && unknown[i] === true) ||
-    tainted.some((t, i) => t && (written[i] ?? []).some(f => !DOC.test(f)))
-  )
+  mention.forEach((m, i) => m && taint(i))
+
+  for (let head = 0; head < queue.length; head += 1) {
+    const i = queue[head] as number
+
+    next[i]?.forEach(taint)
+
+    if (unknown[i] === true) {
+      continue
+    }
+
+    for (const f of written[i] ?? []) {
+      const name = base(f)
+
+      if (!files.has(name)) {
+        files.add(name)
+        readers.get(name)?.forEach(taint)
+        globs.filter(g => g.test.test(name)).forEach(g => taint(g.at))
+      }
+    }
+
+    if (stores[i] === true && !kept) {
+      kept = true
+      stores.forEach((s, k) => s && taint(k))
+    }
+  }
+
+  return tainted.some((t, i) => t && unknown[i] === true) || tainted.some((t, i) => t && (written[i] ?? []).some(f => !isNote(f)))
 }
 
 /** Shapes where text may travel in ways the analysis above does not follow. */
@@ -927,4 +990,107 @@ export function isLight(command: string): boolean {
 /** Whether a process is a shell: it only starts other processes, which are listed by themselves. */
 export function isShell(command: string): boolean {
   return SHELL_PROCESS.has(programName(command))
+}
+
+/** Programs that start the command after their options; seen in the process list, what they start is the job. */
+const PROCESS_WRAPPERS = new Set([...Object.keys(WRAPPERS), 'ionice', 'chrt', 'taskset', 'doas', 'unbuffer'])
+/** Compilers a build runs as processes of their own, whatever the pattern says. */
+const COMPILERS = /^(rustc|clang(\+\+)?(-\d+)?|cc1(plus|obj)?|swiftc|swift-frontend|javac|kotlinc)$/
+/** Build daemons that stay up between builds: a job only while they work. */
+const DAEMON = /\b(GradleDaemon|KotlinCompileDaemon|GradleWorkerMain)\b/
+const LAUNCHERS = /^(node|bun|bunx|npx|uvx|deno|python[\d.]*|pipx)$/
+
+/** The command line with its first word removed (a quoted first word counts as one). */
+function dropFirst(command: string): string {
+  const t = command.trim()
+  const m = /^"[^"]*"\s*|^\S+\s*/.exec(t)
+
+  return t.slice(m?.[0].length ?? t.length)
+}
+
+/** The command line of the program a wrapper like timeout, env or nice starts. */
+function unwrapProcess(command: string): string {
+  let rest = command.trim()
+
+  for (let hops = 0; hops < 10 && PROCESS_WRAPPERS.has(programName(rest)); hops += 1) {
+    const { values = '', first = 0 } = WRAPPERS[programName(rest)] ?? {}
+
+    rest = dropFirst(rest)
+
+    while (/^(-|[A-Za-z_]\w*=)/.test(rest)) {
+      const word = /^\S+/.exec(rest)?.[0] ?? ''
+
+      rest = dropFirst(rest)
+
+      if (word === '--') {
+        break
+      }
+
+      if (/^-[^-]/.test(word) && values.includes(word[word.length - 1] ?? '')) {
+        rest = dropFirst(rest)
+      }
+    }
+
+    for (let k = 0; k < first; k += 1) {
+      rest = dropFirst(rest)
+    }
+  }
+
+  return rest
+}
+
+/** Whether a process is a tool server an agent session keeps open, by its program or the package it runs. */
+export function isToolServer(command: string): boolean {
+  let rest = command.trim()
+
+  while (LAUNCHERS.test(programName(rest)) || /^(npm exec|pnpm dlx|yarn dlx|bun x)\b/.test(rest)) {
+    rest = dropFirst(/^(npm|pnpm|yarn|bun) /.test(rest) ? dropFirst(rest) : rest)
+
+    while (/^(-y|--yes|--|--\S+=\S+)(\s|$)/.test(rest)) {
+      rest = dropFirst(rest)
+    }
+  }
+
+  const first = (/^"([^"]*)"/.exec(rest)?.[1] ?? /^\S*/.exec(rest)?.[0] ?? '').replace(/\\/g, '/')
+  const name = base(first).replace(/@[\w.^~-]*$/, '').replace(/\.(c|m)?js$|\.exe$|\.cmd$/i, '')
+
+  return (
+    /(^|[-_.])mcp([-_.]|$)/i.test(name) ||
+    /node_modules\/(@[^/]+\/)?[^/]*mcp[^/]*\//i.test(first) ||
+    /^@[^/]+\/[^/@]*mcp/i.test(first)
+  )
+}
+
+/**
+ * What a running process is: a heavy job, a build daemon (a job only while it works), or neither.
+ * Only a program counts. A shell or an interpreter running code given inline only starts other
+ * processes, which are listed by themselves; a shell's `-c` script counts when it would run a job.
+ */
+export function judgeProcess(command: string, pattern: RegExp): 'job' | 'daemon' | 'no' {
+  const rest = unwrapProcess(command)
+  const name = programName(rest)
+
+  if (SHELL_PROCESS.has(name)) {
+    const script = /(^|\s)(-\w*c|\/c|-Command|-EncodedCommand)\s+([^]*)$/i.exec(dropFirst(rest))
+
+    return script !== null && startsHeavy(script[3] ?? '', pattern) ? 'job' : 'no'
+  }
+
+  if (INTERPRETERS.test(name) && /^(-[A-Za-z]+\s+)*(-\w*[ce]|--eval|-p|--print)(\s|$)/.test(dropFirst(rest))) {
+    return 'no'
+  }
+
+  if (isToolServer(rest)) {
+    return 'no'
+  }
+
+  if (COMPILERS.test(name)) {
+    return 'job'
+  }
+
+  if (DAEMON.test(rest) && /^java(w)?$/.test(name)) {
+    return 'daemon'
+  }
+
+  return pattern.test(rest) && !isLight(rest) ? 'job' : 'no'
 }

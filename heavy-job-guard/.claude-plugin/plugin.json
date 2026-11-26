@@ -1,6 +1,6 @@
 {
   "name": "heavy-job-guard",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Stops Claude from starting a heavy job (typecheck, tests, builds) while another one is already running on the machine.",
   "author": {
     "name": "Azoof Ahmed"
@@ -11,7 +11,7 @@
       "type": "string",
       "title": "Heavy job pattern",
       "description": "Regular expression matched against Bash commands and running process command lines. A match is a heavy job.",
-      "default": "\\b(tsc|vitest|jest|playwright|oxlint|eslint|xcodebuild|gradlew)\\b|\\b(bun|npm|pnpm|yarn)( run)? (typecheck|test|build|lint|check)\\b|\\bturbo (run )?(typecheck|test|build|lint)\\b|\\bcargo (build|test|check)\\b"
+      "default": "\\b(tsc|vitest|jest|playwright|oxlint|eslint|xcodebuild|gradlew)\\b|\\b(bun|npm|pnpm|yarn)( (run|workspace \\S+|-\\S+|--\\S+( [^-\\s]\\S*)?))* (typecheck|test|t|build|lint|check)\\b|\\bturbo (run )?(typecheck|test|build|lint)\\b|\\bcargo( (\\+|-)\\S+)* (build|b|test|t|check|c|clippy|run|r|bench|doc|nextest)\\b"
     },
     "ignore": {
       "type": "string",

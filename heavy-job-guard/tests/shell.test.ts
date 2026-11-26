@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { isLight, isShell, startsHeavy } from '../hooks/shell'
 
 const HEAVY =
-  /\b(tsc|vitest|jest|playwright|oxlint|eslint|xcodebuild|gradlew)\b|\b(bun|npm|pnpm|yarn)( run)? (typecheck|test|build|lint|check)\b|\bturbo (run )?(typecheck|test|build|lint)\b|\bcargo (build|test|check)\b/
+  /\b(tsc|vitest|jest|playwright|oxlint|eslint|xcodebuild|gradlew)\b|\b(bun|npm|pnpm|yarn)( (run|workspace \S+|-\S+|--\S+( [^-\s]\S*)?))* (typecheck|test|t|build|lint|check)\b|\bturbo (run )?(typecheck|test|build|lint)\b|\bcargo( (\+|-)\S+)* (build|b|test|t|check|c|clippy|run|r|bench|doc|nextest)\b/
 
 const RUNS = [
   'bun run test',
@@ -186,6 +186,55 @@ const LOCAL_BUILDS = [
   'exec > x.sh; echo cargo test; python3 y.py',
   'run() { "$@"; }; run cargo test',
   'echo cargo test | python3 <(echo)',
+  // xargs or sudo -s handing what they read to a program
+  "printf 'cargo build' | xargs env",
+  "printf 'cargo build' | xargs nice",
+  "printf 'cargo build' | xargs timeout 600",
+  "printf 'cargo build' | xargs nohup nice",
+  "printf 'cargo build' | xargs xargs",
+  'echo cargo build | sudo -s',
+  'echo cargo build | sudo -i',
+  'echo cargo build | sudo --login',
+  // programs that write a file another command runs
+  "python3 - <<'E'\nopen('x', 'w').write('cargo build')\nE\nzsh x",
+  "python3 - <<'E'\nimport pathlib; pathlib.Path('x').write_text('cargo build')\nE\nfish x",
+  "node - <<'E'\nrequire('fs').writeFileSync('x', 'cargo build')\nE\ndash x",
+  "perl - <<'E'\nopen(my $f, '|-', 'cargo build');\nE",
+  "php <<'E'\n<?php passthru('cargo build');\nE",
+  "php <<'E'\n<?php proc_open('cargo build', [], $p);\nE",
+  "ruby - <<'E'\nIO.write('x', 'cargo build')\nE\nksh x",
+  // a glob or brace naming a file written here
+  'echo "cargo build" > run.txt; sh *.txt',
+  'echo "cargo build" > run.txt; sh r?n.txt',
+  'echo "cargo build" > run.txt; sh [rs]un.txt',
+  'echo "cargo build" > a.txt; sh {a,b}.txt',
+  'echo "cargo build" > notes/a.md; bash notes/*',
+  // a note's extension on a file a build tool reads by itself
+  'echo "add_custom_target(x ALL COMMAND cargo build)" > CMakeLists.txt; cmake -B b',
+  "cat >> requirements.txt <<'E'\ncargo-build-hook @ git+https://x\nE\npip install -r requirements.txt; cargo build",
+  // the clipboard keeps text that comes back
+  'echo "cargo build" | pbcopy; pbpaste | sh',
+  'echo "cargo build" | pbcopy; pbpaste > x.sh; python3 x.py',
+  'echo "cargo build" | xclip -selection c; xclip -o | bash',
+  // writers that name their output
+  'echo "cargo build" | sort -o x.sh; sh x.sh',
+  'echo "cargo build" | sort -ox.sh; sh x.sh',
+  'echo "cargo build" | sort --output=x.sh; sh x.sh',
+  'echo "cargo build" | uniq - x.sh; sh x.sh',
+  // ssh options after the host still run here
+  "ssh host -o ProxyCommand='cargo build'",
+  'ssh -T host -oProxyCommand="cargo build" true',
+  "ssh host -o LocalCommand='cargo build' -o PermitLocalCommand=yes",
+  'ssh host -F ./cfg true; echo cargo build > cfg',
+  // the default pattern
+  'cargo +nightly build',
+  'cargo -q test',
+  'cargo clippy --all-targets',
+  'cargo +stable -q b',
+  'pnpm --filter web build',
+  'pnpm -r test',
+  'npm t',
+  'yarn workspace x test',
 ]
 
 /** Text and jobs handed to the build board: nothing heavy runs here, whatever else the script does. */
@@ -213,6 +262,11 @@ const NOT_LOCAL = [
   'while pgrep -f "cargo build" >/dev/null; do sleep 5; done; python3 next.py',
   'until ! pgrep -fl "cargo (build|test)"; do sleep 10; done',
   'piforge run -- cargo test 2>&1 | tail -5 > out.log; python3 parse.py',
+  'ssh -o BatchMode=yes host "cargo test" && python3 parse.py',
+  'ssh host -T "cargo test"',
+  'echo "cargo test" | pbcopy',
+  'echo "cargo build" > run.txt; sh *.sh',
+  'echo "cargo build" | sort > counts.txt; python3 x.py',
 ]
 
 const ONLY_MENTIONS = [
@@ -323,7 +377,7 @@ test('generated: quoted text is text, beside commands it cannot vouch for', asyn
     expect([`seed ${seed}`, script, startsHeavy(script, HEAVY)]).toEqual([`seed ${seed}`, script, false])
   }
 
-  expect(Date.now() - started < 10000).toBe(true)
+  expect(10000).toBeGreaterThan(Date.now() - started)
 })
 
 test('generated: a build on a line of its own counts, whatever comes before it', async () => {
@@ -343,7 +397,7 @@ test('generated: a build on a line of its own counts, whatever comes before it',
     expect([`seed ${seed}`, script, startsHeavy(script, HEAVY)]).toEqual([`seed ${seed}`, script, true])
   }
 
-  expect(Date.now() - started < 10000).toBe(true)
+  expect(10000).toBeGreaterThan(Date.now() - started)
 })
 
 test('generated: any input gives an answer quickly', async () => {
@@ -357,12 +411,31 @@ test('generated: any input gives an answer quickly', async () => {
     expect([`seed ${seed}`, typeof startsHeavy(script, HEAVY)]).toEqual([`seed ${seed}`, 'boolean'])
   }
 
-  // ten thousand commands in one script
-  const long = Array.from({ length: 10000 }, (_, k) => (k % 2 === 0 ? 'echo "cargo test" | grep c' : 'python3 x.py')).join('\n')
+  expect(10000).toBeGreaterThan(Date.now() - started)
+})
 
-  expect(startsHeavy(long, HEAVY)).toBe(false)
-  expect(startsHeavy(`${long}\ncargo test`, HEAVY)).toBe(true)
-  expect([`seed ${seed}`, Date.now() - started < 10000]).toEqual([`seed ${seed}`, true])
+test('a long script is judged in time that grows with its length', async () => {
+  // ten thousand commands, each writing a note and naming the one before: every file reaches the next command
+  const script = (n: number) =>
+    Array.from({ length: n }, (_, k) => `echo "cargo test" > n${k}.md; python3 x.py n${k - 1}.md`).join('\n')
+  const time = (n: number) => {
+    const started = performance.now()
+
+    expect(startsHeavy(script(n), HEAVY)).toBe(true)
+
+    return performance.now() - started
+  }
+  const small = Math.max(time(1000), 1)
+  const large = time(10000)
+
+  // ten times the commands: linear is about ten times the time, quadratic a hundred
+  expect(small * 40).toBeGreaterThan(large)
+  expect(5000).toBeGreaterThan(large)
+
+  const quiet = Array.from({ length: 10000 }, (_, k) => (k % 2 === 0 ? 'echo "cargo test" | grep c' : 'python3 x.py')).join('\n')
+
+  expect(startsHeavy(quiet, HEAVY)).toBe(false)
+  expect(startsHeavy(`${quiet}\ncargo test`, HEAVY)).toBe(true)
 })
 
 test('a process is light by its program, not by a word in its path', async () => {

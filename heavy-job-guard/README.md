@@ -20,16 +20,25 @@ It judges only what would run on this machine:
 - **Other commands don't make text count.** When the script also runs something it can't vouch for (a
   script, an interpreter, a tool it doesn't know), a mention counts only if its text can reach that
   command: through a pipe, by being captured into its words, through a file the script writes and
-  the command names (or a file a tool may read on its own, such as a `Makefile`; notes like `.md`,
-  `.txt` and `.log` are exempt), or through what git or nicotine keep and print back.
+  the command names (also by a glob such as `*.txt`), a file a tool may read on its own (a `Makefile`,
+  `CMakeLists.txt`; plain notes like `.md`, `.txt` and `.log` are exempt), or what git, nicotine or the
+  clipboard keep and print back.
 - **When unsure, it refuses.** Shells, variables used as commands, functions, groups and loops whose
-  output goes somewhere, `exec` redirections and syntax it can't follow make any mention count.
+  output goes somewhere, `exec` redirections, an interpreter whose program could write files or start
+  processes, and syntax it can't follow make any mention count. A false refusal costs a wait; a false
+  pass costs the machine's memory.
 
-A job that hides behind a script's own name is seen only once it is running.
+Some text is still refused: a variable holding the text that is later used as an argument, and a
+non-note file written with the text beside a command it can't vouch for, even when nothing runs it.
 
-Only real programs count as a running job: a compiler, a test runner, gradle and the like. A shell or a
-waiting loop whose command line mentions one (`while pgrep -f "cargo build"; do sleep 5; done`) is not a
-job; a Claude shell is named beside the program it started.
+Out of scope: a job that hides behind a script's own name is seen only once it is running, and text
+typed into another agent's shell (a prompt or keystrokes sent to a local terminal) is that agent's to run.
+
+Only real programs count as a running job: a compiler (`rustc`, `clang`, `swiftc`…), a test runner, gradle
+and the like, also under a wrapper such as `timeout`, `env` or `nice`. A build daemon (Gradle, Kotlin)
+counts while it uses CPU. A shell or an interpreter running inline code only starts other processes, so
+a waiting loop (`while pgrep -f "cargo build"; do sleep 5; done`) is not a job; a shell's script counts
+when it would start one. Tool servers an agent keeps open (MCP servers) are never jobs.
 
 It reads the process list with `ps` on macOS and Linux, and with PowerShell's process table
 (`Get-CimInstance Win32_Process`) on Windows. If neither works, it shows a toast once per check and lets
@@ -49,7 +58,7 @@ Set them in `/config`, or in settings under `pluginConfigs["heavy-job-guard"].op
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `pattern` | tsc, vitest, jest, playwright, oxlint, eslint, xcodebuild, gradlew, `bun/npm/pnpm/yarn [run] typecheck/test/build/lint/check`, `turbo run …`, `cargo build/test/check` | Regex for a heavy job. It is matched against both the new command and every running process. |
+| `pattern` | tsc, vitest, jest, playwright, oxlint, eslint, xcodebuild, gradlew, `bun/npm/pnpm/yarn [run/workspace x/--filter x] typecheck/test/t/build/lint/check`, `turbo run …`, `cargo [+toolchain] [-flags] build/test/check/clippy/run/bench/doc/nextest` (and `b`, `t`, `c`, `r`) | Regex for a heavy job. It is matched against both the new command and every running process. |
 | `ignore` | `--lsp`, `--watch`, `watch`, language servers, tsserver | Regex for running processes that match `pattern` but never finish on their own. They never block. |
 | `mode` | `block` | `block` refuses the command; `warn` runs it and shows a toast. |
 | `subagents` | `allow` | `deny` refuses every heavy job a subagent starts, so only the main agent runs them. |

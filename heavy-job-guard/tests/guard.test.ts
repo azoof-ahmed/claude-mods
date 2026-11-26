@@ -123,6 +123,32 @@ test('a tool server an agent keeps open is not a job', async ($, on) => {
   expect(ran).toBe(true)
 })
 
+/** Answers the process list with `listing`, and a CPU query with `cpu` (pid → percent). */
+function answerProcesses(on: On, listing: string, cpu: Record<number, number> = {}) {
+  on('process.run', ($, e) => {
+    const stdout = e.argv.includes('pid=,pcpu=')
+      ? Object.entries(cpu).map(([pid, pcpu]) => `${pid} ${pcpu}`).join('\n')
+      : listing
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+}
+
+type Engine = Parameters<Parameters<typeof test>[1]>[0]
+
+/** Whether `command` runs while `line` is in the process list, and the answer it got. */
+async function runsBeside($: Engine, on: On, line: string, command = 'bun run test', cpu: Record<number, number> = {}) {
+  answerProcesses(on, `${PS_IDLE}\n  900 01:00 ${line}`, cpu)
+  let ran = false
+  on('tool.call', { tool: 'Bash' }, () => {
+    ran = true
+    return { result: { stdout: '', stderr: '', interrupted: false } }
+  })
+
+  const answer = await $.tool.call({ tool: 'Bash', command })
+
+  return { ran, answer: JSON.stringify(answer) }
+}
+
 for (const line of [
   'node /x/node_modules/.bin/vitest run packages/foo-mcp',
   'npx tsc -p packages/mcp',
@@ -130,99 +156,86 @@ for (const line of [
   '/x/foo-mcp/node_modules/.bin/jest',
   'C:\\git tools\\node.exe C:\\x\\jest',
   '/home/a/cat dir/node_modules/.bin/jest',
+  // Claude's shell running a job counts by itself, before or between the programs it starts
+  `/bin/zsh -c source ~/.snap.sh && eval 'npm test packages/mcp' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'cat <<E\\012x\\012E\\012npm test' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'echo '"'"'a'"'"'; npm test' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'nicotine resource run heavy -- cargo test' < /dev/null && pwd -P`,
+  `bash -c npm test; eval 'ls'`,
+  // wrappers: the program under them is the job
+  'timeout 600 cargo build --release',
+  'env RUST_LOG=1 nice -n 5 cargo test',
+  'nohup caffeinate -i ./gradlew assembleDebug',
+  // compilers a build starts
+  '/Users/a/.rustup/toolchains/stable/bin/rustc --crate-name foo --edition=2021 src/lib.rs',
+  '/usr/bin/clang -c x.c -o x.o',
+  'swiftc -O main.swift',
 ]) {
   test(`a running job counts: ${line}`, async ($, on) => {
-    answerPs(on, `${PS_IDLE}\n  900 01:00 ${line}`)
-    let ran = false
-    on('tool.call', { tool: 'Bash' }, () => {
-      ran = true
-      return { result: { stdout: '', stderr: '', interrupted: false } }
-    })
-
-    await $.tool.call({ tool: 'Bash', command: 'bun run test' })
+    const { ran, answer } = await runsBeside($, on, line)
 
     expect(ran).toBe(false)
+    expect(answer).toContain('pid 900')
   })
 }
 
 for (const line of [
   'npx -y @playwright/mcp@latest',
   'npx playwright run-mcp-server',
+  'node /x/node_modules/@playwright/mcp/cli.js --headless',
+  '/x/.npm/_npx/1a2b/node_modules/.bin/mcp-server-playwright --browser chrome',
+  'node /x/node_modules/.bin/playwright-mcp --output-dir x',
   'grep -rn vitest .',
   `/bin/zsh -c source ~/.snap.sh && eval 'git commit -m "npm test passes"' < /dev/null && pwd -P`,
-]) {
-  test(`not a running job: ${line}`, async ($, on) => {
-    answerPs(on, `${PS_IDLE}\n  900 01:00 ${line}`)
-    let ran = false
-    on('tool.call', { tool: 'Bash' }, () => {
-      ran = true
-      return { result: { stdout: '', stderr: '', interrupted: false } }
-    })
-
-    await $.tool.call({ tool: 'Bash', command: 'bun run test' })
-
-    expect(ran).toBe(true)
-  })
-}
-
-const CHILD = '  901 00:59 node /usr/local/bin/npm test'
-
-for (const line of [
-  `/bin/zsh -c source ~/.snap.sh && eval 'npm test packages/mcp' < /dev/null && pwd -P`,
-  `/bin/zsh -c source ~/.snap.sh && eval 'cat <<E\\012x\\012E\\012npm test' < /dev/null && pwd -P`,
-  `/bin/zsh -c source ~/.snap.sh && eval 'echo '"'"'a'"'"'; npm test' < /dev/null && pwd -P`,
-  `bash -c npm test; eval 'ls'`,
-]) {
-  test(`a shell is not a job by itself, only with the program it started: ${line}`, async ($, on) => {
-    let ps = `${PS_IDLE}\n  900 01:00 ${line}`
-    on('process.run', () => ({
-      value: { exitCode: 0, stdout: ps, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
-    }))
-    let ran = 0
-    on('tool.call', { tool: 'Bash' }, () => {
-      ran += 1
-      return { result: { stdout: '', stderr: '', interrupted: false } }
-    })
-
-    await $.tool.call({ tool: 'Bash', command: 'bun run test' })
-    expect(ran).toBe(1)
-
-    ps = `${ps}\n${CHILD}`
-    const answer = await $.tool.call({ tool: 'Bash', command: 'bun run test' })
-
-    expect(ran).toBe(1)
-    expect(JSON.stringify(answer)).toContain('pid 901')
-  })
-}
-
-for (const line of [
+  // waiting for a job, or handing it elsewhere
   `/bin/zsh -c source ~/.snap.sh && eval 'while pgrep -f "cargo build" >/dev/null; do sleep 5; done' < /dev/null && pwd -P`,
   `/bin/zsh -c source ~/.snap.sh && eval 'until ! pgrep -f '"'"'cargo (build|test)'"'"'; do sleep 10; done; python3 next.py' < /dev/null && pwd -P`,
-  `/bin/zsh -c source ~/.snap.sh && eval 'nicotine resource run heavy -- cargo test' < /dev/null && pwd -P`,
   `/bin/zsh -c source ~/.snap.sh && eval 'piforge -C /w run -- sh -c "cargo test"; python3 x.py' < /dev/null && pwd -P`,
   'bash -c while pgrep -f "cargo build"; do sleep 5; done',
   '/bin/sh -c until ! pgrep -x cargo; do sleep 2; done; echo cargo test done',
-  'nicotine resource run heavy -- cargo test',
+  'timeout 600 bash -c while pgrep -f "cargo build"; do sleep 5; done',
+  'env X=1 sh -c until ! pgrep -f "npm test"; do sleep 1; done',
+  'nohup caffeinate -i zsh -c while pgrep -x cargo; do sleep 3; done',
+  'python3 -c import subprocess,time; [time.sleep(5) for _ in iter(lambda: subprocess.run(["pgrep","-f","cargo build"]).returncode == 0, False)]',
+  'python3 -u -c while True: check("cargo test")',
+  'node -e setInterval(() => check("npm test"), 5000)',
   'piforge -C /w run -- cargo test',
   'ssh board cargo test',
   'tmux new-session -d cargo build',
   'pgrep -fl cargo build',
+  'nicotine resource run heavy -- cargo test',
 ]) {
-  test(`waiting for a job or handing it elsewhere is not a job: ${line}`, async ($, on) => {
-    answerPs(on, `${PS_IDLE}\n  900 01:00 ${line}`)
-    let ran = false
-    on('tool.call', { tool: 'Bash' }, () => {
-      ran = true
-      return { result: { stdout: '', stderr: '', interrupted: false } }
-    })
-
-    await $.tool.call({ tool: 'Bash', command: 'cargo test' })
+  test(`not a running job: ${line}`, async ($, on) => {
+    const { ran } = await runsBeside($, on, line, 'cargo test')
 
     expect(ran).toBe(true)
   })
 }
 
-test('generated: shells and waiting loops never count by themselves', async ($, on) => {
+const GRADLE_DAEMON = '/opt/jdk/bin/java -Xmx2g -cp /x/gradle-launcher.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.7'
+
+test('a build daemon waiting between builds is not a job', async ($, on) => {
+  expect((await runsBeside($, on, GRADLE_DAEMON, 'cargo test', { 900: 0.1 })).ran).toBe(true)
+})
+
+test('a working build daemon counts', async ($, on) => {
+  const { ran, answer } = await runsBeside($, on, GRADLE_DAEMON, 'cargo test', { 900: 85 })
+
+  expect(ran).toBe(false)
+  expect(answer).toContain('GradleDaemon')
+})
+
+test('a build daemon whose CPU use cannot be read counts', async ($, on) => {
+  expect((await runsBeside($, on, GRADLE_DAEMON.replace('GradleDaemon', 'KotlinCompileDaemon'), 'cargo test')).ran).toBe(false)
+})
+
+for (const command of ['cargo +nightly build', 'cargo -q test', 'cargo clippy --all', 'pnpm --filter web build', 'npm t', 'yarn workspace x test']) {
+  test(`the default pattern knows: ${command}`, async ($, on) => {
+    expect((await runsBeside($, on, 'node /x/node_modules/.bin/tsc --noEmit', command)).ran).toBe(false)
+  })
+}
+
+test('generated: waiting loops never count, whatever they wait for or are wrapped in', async ($, on) => {
   const seed = Date.now() % 100000
   let x = seed || 1
   const next = () => {
@@ -230,12 +243,16 @@ test('generated: shells and waiting loops never count by themselves', async ($, 
     return x / 2147483648
   }
   const pick = <T>(list: readonly T[]): T => list[Math.floor(next() * list.length)] as T
+  const wrappers = ['', 'timeout 600 ', 'env X=1 ', 'nohup nice -n 5 ', 'caffeinate -i ', 'sudo -n ']
   const shells = ['/bin/sh -c', '/bin/bash -c', '/bin/zsh -c', 'bash -lc', 'dash -c', 'C:\\Windows\\System32\\cmd.exe /c', 'pwsh -Command']
-  const words = ['cargo build', 'cargo test', 'npm test', 'tsc', 'jest', 'while', 'pgrep -f', 'sleep 5;', 'done', '"', "'", '*', '日本', '\\012', '$(x)', '|', '&&']
+  const words = ['cargo build', 'cargo test', 'npm test', 'tsc', 'jest', 'gradlew', '日本', '*', '?', '|', '&&', ';', '\\012', 'a'.repeat(300)]
   const lines: string[] = []
 
   for (let n = 0; n < 200; n += 1) {
-    lines.push(`  ${1000 + n} 01:00 ${pick(shells)} ${Array.from({ length: 1 + Math.floor(next() * 8) }, () => pick(words)).join(' ')}`)
+    const waits = Array.from({ length: 1 + Math.floor(next() * 5) }, () => pick(words)).join(' ')
+    const loop = pick([`while pgrep -f "${waits}"; do sleep 5; done`, `until ! pgrep -fl "${waits}" >/dev/null; do sleep 1; done; echo "${waits}"`])
+
+    lines.push(`  ${1000 + n} 01:00 ${pick(wrappers)}${pick(shells)} ${loop}`)
   }
 
   answerPs(on, `${PS_IDLE}\n${lines.join('\n')}`)
@@ -245,9 +262,9 @@ test('generated: shells and waiting loops never count by themselves', async ($, 
     return { result: { stdout: '', stderr: '', interrupted: false } }
   })
 
-  await $.tool.call({ tool: 'Bash', command: 'cargo test' })
+  const answer = await $.tool.call({ tool: 'Bash', command: 'cargo test' })
 
-  expect([`seed ${seed}`, ran]).toEqual([`seed ${seed}`, true])
+  expect([`seed ${seed}`, ran ? '' : JSON.stringify(answer)]).toEqual([`seed ${seed}`, ''])
 })
 
 test('formats elapsed seconds like ps', async () => {
