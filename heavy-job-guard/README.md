@@ -10,12 +10,26 @@ Claude waits instead of piling on. Because it reads the process list rather than
 also sees jobs started in the background, by subagents, by other Claude sessions and in your own
 terminals.
 
-Text is not a command: a commit message, a search, a here-document or a note that mentions a test
-runner is let through, as long as every command in the script is one known to leave it as text
-(`git commit`, `grep`, `cat` and the like). As soon as the script also has something that may run the
-text (a shell, a script, an interpreter, a variable used as a command, or syntax it can't follow), any
-mention counts. A job that hides behind a script's own name is seen only once it is running, and a
-prompt sent to another agent is that agent's to run.
+It judges only what would run on this machine:
+
+- **Text is not a command.** A commit message, a search, a message to another agent, an `echo`, a note
+  appended with `>>` or a here-document written to a file that mentions a test runner is let through.
+- **Remote jobs are not local.** A command handed to the build board (`piforge run/build/ci/ssh`, also
+  through `nicotine resource run <name> -- piforge …`) or to `ssh host …` runs elsewhere. `piforge prep
+  -- <command>` and `nicotine resource run <name> -- <command>` run the command here, so it is judged.
+- **Other commands don't make text count.** When the script also runs something it can't vouch for (a
+  script, an interpreter, a tool it doesn't know), a mention counts only if its text can reach that
+  command: through a pipe, by being captured into its words, through a file the script writes and
+  the command names (or a file a tool may read on its own, such as a `Makefile`; notes like `.md`,
+  `.txt` and `.log` are exempt), or through what git or nicotine keep and print back.
+- **When unsure, it refuses.** Shells, variables used as commands, functions, groups and loops whose
+  output goes somewhere, `exec` redirections and syntax it can't follow make any mention count.
+
+A job that hides behind a script's own name is seen only once it is running.
+
+Only real programs count as a running job: a compiler, a test runner, gradle and the like. A shell or a
+waiting loop whose command line mentions one (`while pgrep -f "cargo build"; do sleep 5; done`) is not a
+job; a Claude shell is named beside the program it started.
 
 It reads the process list with `ps` on macOS and Linux, and with PowerShell's process table
 (`Get-CimInstance Win32_Process`) on Windows. If neither works, it shows a toast once per check and lets

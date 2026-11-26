@@ -7,15 +7,18 @@
  * command, syntax this can't follow), the whole text counts, because that something may run it.
  */
 
-type Word = { text: string; quoted: boolean; inner: Script[] }
-type Simple = { words: Word[]; heredoc: string; inner: Script[] }
-type Script = { commands: Simple[]; sure: boolean }
+/** `redirAt`: where in `text` an unquoted `<` or `>` begins a redirection, or -1. */
+type Word = { text: string; quoted: boolean; inner: Script[]; redirAt: number }
+/** `pipeIn`/`pipeOut`: read from the command before it, or write into the command after it. */
+type Simple = { words: Word[]; heredoc: string; inner: Script[]; pipeIn: boolean; pipeOut: boolean }
+/** `tangled`: has a subshell, a function or a process substitution, where text can travel unseen. */
+type Script = { commands: Simple[]; sure: boolean; tangled: boolean }
 
 /** Commands that look at, print, move or send what they are given, and run none of it. */
 const LIGHT = new Set(
   (
     'echo printf cat tee grep egrep fgrep pgrep pkill ps kill ls cd pwd type which head tail cut uniq wc tr ' +
-    'diff stat file du df mkdir touch cp mv rm ln chmod jq curl piforge sleep true false : exit return wait ' +
+    'diff stat file du df mkdir touch cp mv rm ln chmod jq curl sleep true false : exit return wait ' +
     'break continue date basename dirname realpath readlink seq hostname uname whoami id uptime nl ' +
     'column comm paste shasum pushd popd read unset pbcopy'
   ).split(' '),
@@ -35,8 +38,17 @@ const CHECKED: Record<string, (words: Word[]) => boolean> = {
   codex: args => !args.some(w => /^(sandbox|debug|mcp|-c|--config)/.test(w.text)),
 }
 /** Seen in the process list these are never the job: what they start is listed by itself. */
-const LIGHT_PROCESS = new Set([...LIGHT, ...Object.keys(CHECKED), 'nicotine', 'less', 'man', 'ag', 'open'])
+const LIGHT_PROCESS = new Set([...LIGHT, ...Object.keys(CHECKED), 'nicotine', 'piforge', 'less', 'man', 'ag', 'open'])
 const SHELLS = new Set('sh bash zsh dash ksh fish eval source .'.split(' '))
+/** Seen in the process list these only start other processes, which are listed by themselves. */
+const SHELL_PROCESS = new Set('sh bash zsh dash ksh fish tcsh csh cmd powershell pwsh'.split(' '))
+/** Commands whose arguments name files they write. */
+const WRITERS = new Set('tee cp mv ln install rsync scp'.split(' '))
+/** Commands that keep what they are given (a commit, a message) where the same program can print it back. */
+const STORES = new Set('git gh nicotine tmux claude codex'.split(' '))
+/** Files people read: nothing runs them unless told to by name. */
+const DOC = /\.(md|markdown|txt|text|log|rst|adoc|org|csv|tsv)$/i
+const NOT_A_FILE = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/
 /** Programs that run the command after their own options: which options take a value, and how many words come first. */
 const WRAPPERS: Record<string, { values: string; first?: number }> = {
   sudo: { values: 'ugphCDRTUrt' },
@@ -70,6 +82,7 @@ const ARITHMETIC = /^\$\(\([^()`]*\)\)/
 class Parser {
   i = 0
   sure = true
+  tangled = false
   private pending: { tag: string; tabs: boolean; expands: boolean; into: Simple }[] = []
 
   constructor(
@@ -80,26 +93,30 @@ class Parser {
   /** Commands up to the end, or up to the `)` that closes a substitution. */
   script(nested = false): Script {
     const commands: Simple[] = []
-    let command: Simple = { words: [], heredoc: '', inner: [] }
+    const fresh = (pipeIn = false): Simple => ({ words: [], heredoc: '', inner: [], pipeIn, pipeOut: false })
+    let command = fresh()
     let word: Word | undefined
     let parens = 0
     let redirect = false
 
-    const open = () => (word ??= { text: '', quoted: false, inner: [] })
+    const open = () => (word ??= { text: '', quoted: false, inner: [], redirAt: -1 })
     const endWord = () => {
       if (word !== undefined) {
         command.words.push(word)
         word = undefined
       }
     }
-    const endCommand = () => {
+    const endCommand = (piped = false) => {
       endWord()
 
       if (command.words.length > 0 || command.inner.length > 0) {
         commands.push(command)
+      } else if (piped) {
+        // what feeds this pipe is a group: `( … ) |`
+        this.tangled = true
       }
 
-      command = { words: [], heredoc: '', inner: [] }
+      command = fresh(piped)
     }
 
     if (this.depth > 20) {
@@ -152,6 +169,7 @@ class Parser {
       }
 
       if (this.s.startsWith('<(', this.i) || this.s.startsWith('>(', this.i) || this.s.startsWith('=(', this.i)) {
+        this.tangled = true
         this.i += 2
         open().inner.push(this.nested())
         continue
@@ -160,6 +178,7 @@ class Parser {
       if (this.s.startsWith('<<<', this.i)) {
         endWord()
         open().text += '<<<'
+        open().redirAt = 0
         endWord()
         this.i += 3
         continue
@@ -199,16 +218,26 @@ class Parser {
           endCommand()
           this.i += 1
 
-          return { commands, sure: this.sure }
+          return { commands, sure: this.sure, tangled: this.tangled }
         }
 
         this.sure &&= parens > 0
         parens -= 1
       } else if (c === '(') {
         parens += 1
+        this.tangled = true
       }
 
-      if (c === ';' || c === '|' || c === '&' || c === '(' || c === ')') {
+      if (c === '|') {
+        const or = this.s[this.i + 1] === '|'
+
+        command.pipeOut ||= !or
+        endCommand(!or)
+        this.i += or || this.s[this.i + 1] === '&' ? 2 : 1
+        continue
+      }
+
+      if (c === ';' || c === '&' || c === '(' || c === ')') {
         endCommand()
         this.i += 1
         continue
@@ -221,6 +250,11 @@ class Parser {
       }
 
       redirect = c === '>' || c === '<'
+
+      if (redirect && open().redirAt < 0) {
+        open().redirAt = open().text.length
+      }
+
       open().text += c
       this.i += 1
     }
@@ -232,7 +266,7 @@ class Parser {
       this.sure = false
     }
 
-    return { commands, sure: this.sure }
+    return { commands, sure: this.sure, tangled: this.tangled }
   }
 
   private nested(): Script {
@@ -283,7 +317,10 @@ class Parser {
       this.sure = false
       this.i = this.s.length
     } else {
-      open().inner.push(new Parser((m[1] ?? '').replace(/\\([`\\$])/g, '$1'), this.depth + 1).whole())
+      const inner = new Parser((m[1] ?? '').replace(/\\([`\\$])/g, '$1'), this.depth + 1)
+
+      open().inner.push(inner.whole())
+      this.tangled ||= inner.tangled
       this.i += m[0].length
     }
 
@@ -293,7 +330,7 @@ class Parser {
   whole(): Script {
     const { commands } = this.script()
 
-    return { commands, sure: this.sure && this.pending.length === 0 }
+    return { commands, sure: this.sure && this.pending.length === 0, tangled: this.tangled }
   }
 
   private single(): string {
@@ -373,10 +410,11 @@ class Parser {
 
       if (expands) {
         const text = new Parser(body, this.depth + 1)
-        const word: Word = { text: '', quoted: true, inner: [] }
+        const word: Word = { text: '', quoted: true, inner: [], redirAt: -1 }
 
         text.double(word, '')
         this.sure &&= text.sure && text.pending.length === 0
+        this.tangled ||= text.tangled
         into.inner.push(...word.inner)
       }
     }
@@ -475,6 +513,27 @@ function safeSed(args: Word[]): boolean {
   }
 
   return true
+}
+
+/**
+ * The build board's client sends what it runs to the board, so its commands are text here. Only
+ * `prep -- <command>` runs a command on this machine, and a stash's refetch command may.
+ */
+function safePiforge(words: Word[], whole: string): boolean {
+  let at = 1
+
+  while (/^-/.test(words[at]?.text ?? '')) {
+    at += words[at]?.text === '-C' ? 2 : 1
+  }
+
+  const texts = textsOf(words)
+  const end = texts.indexOf('--', at)
+
+  if (texts[at] === 'prep') {
+    return end < 0 || isText(words.slice(end + 1), '', whole)
+  }
+
+  return !(texts[at] === 'stash' && texts.some(t => t.startsWith('--refetch')))
 }
 
 /** The program's name, when it is one found by name or in a system folder. */
@@ -592,8 +651,19 @@ function isText(words: Word[], heredoc: string, whole: string): boolean {
     return starts.every(k => isText(rest.slice(k), '', whole))
   }
 
+  if (name === 'piforge') {
+    return safePiforge(rest, whole)
+  }
+
   if (name === 'nicotine') {
     const sub = texts.slice(1, 3).join(' ')
+
+    // it holds a resource while the command after `--` runs here
+    if (sub === 'resource run') {
+      const end = texts.indexOf('--')
+
+      return end > 3 && end < texts.length - 1 && isText(rest.slice(end + 1), '', whole)
+    }
 
     // what another agent is asked to do is that agent's to run
     return /^agent (send|report|ls|read|wait|show|set-status)$/.test(sub) || (sub === 'agent new' && /^(claude|codex|gemini|opencode)$/.test(texts[3] ?? '') && !texts.includes('--')) || (texts[1] === 'browser' && texts[2] !== 'eval')
@@ -611,23 +681,30 @@ function isText(words: Word[], heredoc: string, whole: string): boolean {
   return LIGHT.has(name) || (Object.hasOwn(CHECKED, name) && (CHECKED[name]?.(args) ?? false))
 }
 
+/** A command, the command whose word or here-document holds its output, and the one piping into it. */
+type Node = { c: Simple; outer: number; prev: number }
+
 /** Every command of a script, with those inside its substitutions. */
-function flatten(script: Script): { commands: Simple[]; sure: boolean } {
-  const commands: Simple[] = []
+function flatten(script: Script, outer = -1, nodes: Node[] = []): { nodes: Node[]; sure: boolean; tangled: boolean } {
   let sure = script.sure
+  let tangled = script.tangled
+  let prev = -1
 
   for (const command of script.commands) {
-    commands.push(command)
+    const at = nodes.length
+
+    nodes.push({ c: command, outer, prev: command.pipeIn ? prev : -1 })
+    prev = at
 
     for (const inner of [...command.inner, ...command.words.flatMap(w => w.inner)]) {
-      const all = flatten(inner)
+      const all = flatten(inner, at, nodes)
 
-      commands.push(...all.commands)
       sure &&= all.sure
+      tangled ||= all.tangled
     }
   }
 
-  return { commands, sure }
+  return { nodes, sure, tangled }
 }
 
 /** Words whose own text is never excused: assignments, and the words of a test or a loop. */
@@ -638,9 +715,167 @@ function ownText(words: Word[]): string {
   return textsOf(all ? words : words.slice(0, at)).join(' ')
 }
 
+/** The words of the program a command runs, past keywords, assignments and wrappers like sudo. */
+function program(words: Word[]): Word[] {
+  let rest = words.slice(Math.max(0, words.findIndex(w => !KEYWORD.test(w.text) && !ASSIGNS.test(w.text))))
+
+  for (let hops = 0; hops < 10 && Object.hasOwn(WRAPPERS, nameOf(rest[0])); hops += 1) {
+    const from = wrapped(rest, WRAPPERS[nameOf(rest[0])] ?? { values: '' })
+
+    if (from === undefined || from >= rest.length) {
+      break
+    }
+
+    rest = rest.slice(from)
+  }
+
+  return rest
+}
+
+/** A file a command names: a redirection's target or an argument, as text. */
+const fileOf = (w: Word) => (w.inner.length > 0 ? '?' : w.text)
+const base = (path: string) => path.replace(/\/+$/, '').replace(/^.*\//, '')
+
+/** Files a command writes: where its output is redirected, and what a writer like tee or cp is given. */
+function writes(words: Word[]): string[] {
+  const out: string[] = []
+
+  for (let at = 0; at < words.length; at += 1) {
+    const w = words[at] as Word
+
+    if (w.redirAt < 0 || w.text[w.redirAt] !== '>') {
+      continue
+    }
+
+    const op = /^>[>|&]?/.exec(w.text.slice(w.redirAt))?.[0] ?? '>'
+    const rest = w.text.slice(w.redirAt + op.length)
+    const target = rest === '' ? words[(at += 1)] : { ...w, text: rest }
+
+    // `>&2` copies a descriptor; `>&file` writes a file
+    if (target !== undefined && !(op === '>&' && /^(\d+|-)$/.test(target.text))) {
+      out.push(fileOf(target))
+    }
+  }
+
+  const prog = program(words)
+  const name = nameOf(prog[0])
+  const args = prog.slice(1).filter(w => w.redirAt < 0 && !w.text.startsWith('-'))
+
+  if (WRITERS.has(name) || (name === 'sed' && prog.some(w => /^(-[^-]*i|--in-place)/.test(w.text)))) {
+    out.push(...args.map(fileOf))
+  } else if (name === 'dd') {
+    out.push(...args.filter(w => w.text.startsWith('of=')).map(w => fileOf(w).slice(3)))
+  } else if (/^g?awk$/.test(name)) {
+    // awk can print into any file its program names
+    out.push('?')
+  }
+
+  return out.filter(f => !NOT_A_FILE.test(f))
+}
+
+/** Every file a command names, by its last part: arguments and redirections alike. */
+function names(words: Word[]): string[] {
+  return words.map(w => base(w.redirAt < 0 ? w.text : w.text.slice(w.redirAt).replace(/^[<>]+[|&]?/, ''))).filter(n => n !== '' && n !== '-')
+}
+
+/**
+ * Whether a command the script can't vouch for could be given text that names a heavy job. Text
+ * travels by pipe, by being captured into another command's words, through files the script writes
+ * (when a command names the file, or the file is one a tool may read by itself) and through what
+ * git, nicotine and the like keep and print back. Text that goes none of those ways (a message,
+ * a commit, a job handed to the build board, a note) reaches nothing, whatever else the script runs.
+ */
+function reaches(nodes: Node[], unknown: boolean[], mention: boolean[]): boolean {
+  const tainted = [...mention]
+  const stores = nodes.map(n => STORES.has(nameOf(program(n.c.words)[0])))
+  const written = nodes.map(n => writes(n.c.words))
+  const named = nodes.map(n => names(n.c.words))
+  const inner: number[][] = nodes.map(() => [])
+  const files = new Set<string>()
+  let kept = false
+  let changed = true
+
+  nodes.forEach((n, i) => inner[n.outer]?.push(i))
+
+  for (let round = 0; changed && round <= nodes.length + 1; round += 1) {
+    changed = false
+
+    nodes.forEach((n, i) => {
+      if (tainted[i] === true) {
+        return
+      }
+
+      tainted[i] =
+        (n.prev >= 0 && tainted[n.prev] === true) ||
+        (inner[i] ?? []).some(k => tainted[k] === true) ||
+        (named[i] ?? []).some(f => files.has(f)) ||
+        (kept && stores[i] === true)
+      changed ||= tainted[i]
+    })
+
+    nodes.forEach((_, i) => {
+      if (tainted[i] !== true || unknown[i] === true) {
+        return
+      }
+
+      for (const f of written[i] ?? []) {
+        changed ||= !files.has(base(f))
+        files.add(base(f))
+      }
+
+      changed ||= stores[i] === true && !kept
+      kept ||= stores[i] === true
+    })
+  }
+
+  return (
+    // bounded above; if it ever ran out, say so the safe way
+    changed ||
+    tainted.some((t, i) => t && unknown[i] === true) ||
+    tainted.some((t, i) => t && (written[i] ?? []).some(f => !DOC.test(f)))
+  )
+}
+
+/** Shapes where text may travel in ways the analysis above does not follow. */
+function tangled(nodes: Node[], unknown: boolean[]): boolean {
+  return nodes.some((n, i) => {
+    const words = n.c.words
+    const first = words[0]?.text ?? ''
+    const prog = program(words)[0]
+
+    return (
+      // a group or a loop whose output goes somewhere
+      words.some(w => !w.quoted && /^[{}]$/.test(w.text)) ||
+      first === 'function' ||
+      (CLOSER.test(first) && (n.c.pipeOut || words.length > 1)) ||
+      // exec sends all later output where it says
+      nameOf(words.find(w => !KEYWORD.test(w.text) && !ASSIGNS.test(w.text))) === 'exec' ||
+      // a command chosen by a variable
+      (unknown[i] === true && prog !== undefined && (prog.inner.length > 0 || /\$/.test(prog.text)))
+    )
+  })
+}
+
+/** Whether a command's words or here-document name a heavy job, also where an option is glued to it (`-O"npm test"`). */
+function mentioned(c: Simple, pattern: RegExp): boolean {
+  const texts = textsOf(c.words)
+
+  return (
+    pattern.test(texts.join(' ')) ||
+    pattern.test(c.heredoc) ||
+    texts.some((t, at) => {
+      const tail = texts.slice(at + 1, at + 20).join(' ')
+      const cuts = [t.indexOf('=') + 1, ...(t.startsWith('-') ? [1, 2, 3] : [])].filter(k => k > 0)
+
+      return cuts.some(k => pattern.test(`${t.slice(k)} ${tail}`))
+    })
+  )
+}
+
 /** Whether running `text` would start something `pattern` names. */
 export function startsHeavy(text: string, pattern: RegExp): boolean {
-  const { commands, sure } = flatten(new Parser(text).whole())
+  const { nodes, sure, tangled: grouped } = flatten(new Parser(text).whole())
+  const commands = nodes.map(n => n.c)
   const mentions =
     pattern.test(text) ||
     pattern.test(text.replace(/[ \t]*\\\r?\n[ \t]*/g, ' ')) ||
@@ -653,15 +888,23 @@ export function startsHeavy(text: string, pattern: RegExp): boolean {
   // a git hook written here runs when git does
   const hooks = /\.git\b|husky|gitconfig|hooksPath|git-(path|dir|common-dir)/i.test(text) && commands.some(c => textsOf(c.words).some(t => /(^|\/)git$/.test(t)))
 
-  return (
-    !sure ||
-    hooks ||
-    commands.some(c => !isText(c.words, c.heredoc, text) || pattern.test(ownText(c.words)))
-  )
+  if (!sure || hooks || commands.some(c => pattern.test(ownText(c.words)))) {
+    return true
+  }
+
+  const unknown = commands.map(c => !isText(c.words, c.heredoc, text))
+
+  if (!unknown.includes(true)) {
+    return false
+  }
+
+  const mention = commands.map(c => mentioned(c, pattern))
+
+  return grouped || tangled(nodes, unknown) || reaches(nodes, unknown, mention)
 }
 
-/** Whether a process is a program that is never the job itself, by how its command line begins. */
-export function isLight(command: string): boolean {
+/** A process's program name, when its command line shows it for certain. */
+function programName(command: string): string {
   const quoted = /^"([^"]+)"/.exec(command.trim())
   const program = quoted?.[1] ?? command.trim().split(/\s/)[0] ?? ''
   const cut = Math.max(program.lastIndexOf('/'), program.lastIndexOf('\\')) + 1
@@ -670,8 +913,18 @@ export function isLight(command: string): boolean {
 
   // a path cut at a space names a folder, not a program
   if (cut > 0 && !/[/\\]s?bin[/\\]$/.test(folder) && !name.endsWith('.exe')) {
-    return false
+    return ''
   }
 
-  return LIGHT_PROCESS.has(name.replace(/\.exe$/, ''))
+  return name.replace(/\.exe$/, '')
+}
+
+/** Whether a process is a program that is never the job itself, by how its command line begins. */
+export function isLight(command: string): boolean {
+  return LIGHT_PROCESS.has(programName(command))
+}
+
+/** Whether a process is a shell: it only starts other processes, which are listed by themselves. */
+export function isShell(command: string): boolean {
+  return SHELL_PROCESS.has(programName(command))
 }

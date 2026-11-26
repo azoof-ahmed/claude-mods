@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { isLight, startsHeavy } from './shell'
+import { isLight, isShell, startsHeavy } from './shell'
 
 type Job = { pid: number; elapsed: string; command: string }
 
@@ -78,7 +78,11 @@ async function processList($: EngineInterface): Promise<string | undefined> {
     .join('\n')
 }
 
-/** Every process on the machine whose command line matches `pattern` and not `ignore`, parents first. */
+/**
+ * The heavy jobs running on the machine, parents first. Only a program counts (a compiler, a test
+ * runner, gradle), never a shell or a waiting loop that only mentions one. Claude's own shell is
+ * listed beside the program it started, because its command says what the job is.
+ */
 export async function runningJobs(
   $: EngineInterface,
   pattern: RegExp,
@@ -91,6 +95,7 @@ export async function runningJobs(
   }
 
   const jobs: Job[] = []
+  let programs = 0
 
   for (const line of listing.split('\n')) {
     const match = /^\s*(\d+)\s+(\S+)\s+(.*)$/.exec(line)
@@ -102,19 +107,17 @@ export async function runningJobs(
 
     // Claude's shell holds a script; anything else is a program and its arguments
     const shell = unwrap(command)
-    const heavy =
-      shell === undefined
-        ? pattern.test(command) && !isLight(command)
-        : startsHeavy(shell.script, pattern) || pattern.test(shell.around)
+    const program = shell === undefined && pattern.test(command) && !isLight(command) && !isShell(command)
 
-    if (!heavy) {
+    if (!program && (shell === undefined || !startsHeavy(shell.script, pattern))) {
       continue
     }
 
+    programs += program ? 1 : 0
     jobs.push({ pid: Number(match[1]), elapsed: match[2] ?? '', command: shell?.script ?? command })
   }
 
-  return jobs.sort((a, b) => a.pid - b.pid)
+  return programs === 0 ? [] : jobs.sort((a, b) => a.pid - b.pid)
 }
 
 export function describeJobs(jobs: readonly Job[]): string {
