@@ -128,10 +128,6 @@ for (const line of [
   'npx tsc -p packages/mcp',
   'npm test -- my mcp server',
   '/x/foo-mcp/node_modules/.bin/jest',
-  `/bin/zsh -c source ~/.snap.sh && eval 'npm test packages/mcp' < /dev/null && pwd -P`,
-  `/bin/zsh -c source ~/.snap.sh && eval 'cat <<E\\012x\\012E\\012npm test' < /dev/null && pwd -P`,
-  `/bin/zsh -c source ~/.snap.sh && eval 'echo '"'"'a'"'"'; npm test' < /dev/null && pwd -P`,
-  `bash -c npm test; eval 'ls'`,
   'C:\\git tools\\node.exe C:\\x\\jest',
   '/home/a/cat dir/node_modules/.bin/jest',
 ]) {
@@ -168,6 +164,91 @@ for (const line of [
     expect(ran).toBe(true)
   })
 }
+
+const CHILD = '  901 00:59 node /usr/local/bin/npm test'
+
+for (const line of [
+  `/bin/zsh -c source ~/.snap.sh && eval 'npm test packages/mcp' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'cat <<E\\012x\\012E\\012npm test' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'echo '"'"'a'"'"'; npm test' < /dev/null && pwd -P`,
+  `bash -c npm test; eval 'ls'`,
+]) {
+  test(`a shell is not a job by itself, only with the program it started: ${line}`, async ($, on) => {
+    let ps = `${PS_IDLE}\n  900 01:00 ${line}`
+    on('process.run', () => ({
+      value: { exitCode: 0, stdout: ps, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }))
+    let ran = 0
+    on('tool.call', { tool: 'Bash' }, () => {
+      ran += 1
+      return { result: { stdout: '', stderr: '', interrupted: false } }
+    })
+
+    await $.tool.call({ tool: 'Bash', command: 'bun run test' })
+    expect(ran).toBe(1)
+
+    ps = `${ps}\n${CHILD}`
+    const answer = await $.tool.call({ tool: 'Bash', command: 'bun run test' })
+
+    expect(ran).toBe(1)
+    expect(JSON.stringify(answer)).toContain('pid 901')
+  })
+}
+
+for (const line of [
+  `/bin/zsh -c source ~/.snap.sh && eval 'while pgrep -f "cargo build" >/dev/null; do sleep 5; done' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'until ! pgrep -f '"'"'cargo (build|test)'"'"'; do sleep 10; done; python3 next.py' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'nicotine resource run heavy -- cargo test' < /dev/null && pwd -P`,
+  `/bin/zsh -c source ~/.snap.sh && eval 'piforge -C /w run -- sh -c "cargo test"; python3 x.py' < /dev/null && pwd -P`,
+  'bash -c while pgrep -f "cargo build"; do sleep 5; done',
+  '/bin/sh -c until ! pgrep -x cargo; do sleep 2; done; echo cargo test done',
+  'nicotine resource run heavy -- cargo test',
+  'piforge -C /w run -- cargo test',
+  'ssh board cargo test',
+  'tmux new-session -d cargo build',
+  'pgrep -fl cargo build',
+]) {
+  test(`waiting for a job or handing it elsewhere is not a job: ${line}`, async ($, on) => {
+    answerPs(on, `${PS_IDLE}\n  900 01:00 ${line}`)
+    let ran = false
+    on('tool.call', { tool: 'Bash' }, () => {
+      ran = true
+      return { result: { stdout: '', stderr: '', interrupted: false } }
+    })
+
+    await $.tool.call({ tool: 'Bash', command: 'cargo test' })
+
+    expect(ran).toBe(true)
+  })
+}
+
+test('generated: shells and waiting loops never count by themselves', async ($, on) => {
+  const seed = Date.now() % 100000
+  let x = seed || 1
+  const next = () => {
+    x = (x * 1103515245 + 12345) % 2147483648
+    return x / 2147483648
+  }
+  const pick = <T>(list: readonly T[]): T => list[Math.floor(next() * list.length)] as T
+  const shells = ['/bin/sh -c', '/bin/bash -c', '/bin/zsh -c', 'bash -lc', 'dash -c', 'C:\\Windows\\System32\\cmd.exe /c', 'pwsh -Command']
+  const words = ['cargo build', 'cargo test', 'npm test', 'tsc', 'jest', 'while', 'pgrep -f', 'sleep 5;', 'done', '"', "'", '*', '日本', '\\012', '$(x)', '|', '&&']
+  const lines: string[] = []
+
+  for (let n = 0; n < 200; n += 1) {
+    lines.push(`  ${1000 + n} 01:00 ${pick(shells)} ${Array.from({ length: 1 + Math.floor(next() * 8) }, () => pick(words)).join(' ')}`)
+  }
+
+  answerPs(on, `${PS_IDLE}\n${lines.join('\n')}`)
+  let ran = false
+  on('tool.call', { tool: 'Bash' }, () => {
+    ran = true
+    return { result: { stdout: '', stderr: '', interrupted: false } }
+  })
+
+  await $.tool.call({ tool: 'Bash', command: 'cargo test' })
+
+  expect([`seed ${seed}`, ran]).toEqual([`seed ${seed}`, true])
+})
 
 test('formats elapsed seconds like ps', async () => {
   expect(etime(5)).toBe('00:05')

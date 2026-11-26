@@ -1,6 +1,6 @@
 {
   "name": "heavy-job-guard",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Stops Claude from starting a heavy job (typecheck, tests, builds) while another one is already running on the machine.",
   "author": {
     "name": "Azoof Ahmed"
