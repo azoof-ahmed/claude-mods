@@ -65,7 +65,7 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `questions [--all]` | Lists open questions (or all of them). |
 | `answer <qid> "<a>"` | Records the answer and sends it to the asker on the bus. |
 | `preflight [--min-ram-gb N] [--min-battery P] [--max-user-idle-s S]` | GO (exit 0) or WAIT (exit 1) for a heavy job, with the reasons. Works on Windows, Linux and macOS. |
-| `usage [--probe] [--json] [--debug]` | The latest usage reading (session and weekly %). `--probe` reads `/usage` now (orca, herdr, tmux). `--debug` saves every raw screen read to `<reportsDir>/usage-debug/`. |
+| `usage [--probe] [--json] [--debug]` | The latest usage reading (session and weekly %). `--probe` reads `/usage` now (orca, herdr, nicotine, tmux). `--debug` saves every raw screen read to `<reportsDir>/usage-debug/`. |
 | `usage-watch [--start] [--once] [--probe] [--debug]` | Probes usage on the `probeIntervals` schedule and alerts the coordinator at the thresholds. A reading younger than the interval is reused (and says so); one without numbers never is, and a probe that reads no numbers never replaces a good reading. `--probe` forces a probe now. `--start` runs it in its own terminal. |
 | `pause [--tick] [--wait]` | The graceful pause: asks every live lane to checkpoint and stop. `--tick` advances it; `--wait` runs it to the end. The plugin ticks it every minute. |
 | `paused` | A worker reports that it has checkpointed (uses `AGENT_BUS_ROLE`, or `--role`). |
@@ -79,9 +79,12 @@ With agent-bus installed, `init` also creates the bus and registers the roles (d
 | `manual` (default) | Prints the command, with `AGENT_BUS_ROLE` set, for you to run in a new terminal. | You close it. |
 | `orca` | `orca terminal create --worktree path:<repo> --title <role>`, then the worker command is typed into it. The handle is registered on the bus. | `orca terminal close --tab` |
 | `herdr` | A tab labelled `<role>` in the herdr workspace that already has a pane in `<repo>` (else a new, unfocused workspace named after the repo): `herdr tab create --env AGENT_BUS_ROLE=<role> --env COORD_LANE=...`, then `herdr pane run`. The lane keeps the pane id (registered on the bus), the tab id and the terminal id. | `herdr tab close` |
+| `nicotine` | A nicotine agent named `<role>`: `nicotine --json agent run -n <role> -- sh -c 'cd <repo> && COORD_LANE=... AGENT_BUS_ROLE=<role> <workerCommand>'`, run from `<repo>`. The nicotine daemon starts the agent, so it inherits the daemon's environment: the command first unsets every inherited `AGENT_BUS_*` and `COORD_*` variable, and `NICOTINE_AGENT`/`NICOTINE_BROWSER_TAB` while they still name the spawner, then sets the lane's env and cwd. The lane keeps the agent id as its handle, plus its name and nicotine session. `status` counts a lane live while `nicotine agent ls` lists its id as live. The usage probe reads the screen with `nicotine agent read --scrollback`. | `nicotine agent kill`, then `agent rm --force`, only while the id still carries the lane's name |
 | `tmux` | `tmux new-window -n <role> -c <repo> -e AGENT_BUS_ROLE=<role>`, in the current session or a detached `coord` session. | `tmux kill-window` |
 | `wt` | A new Windows Terminal tab (`wt -w 0 nt --title <role> -d <repo>`). | You close it. |
-| `auto` | `herdr` inside a herdr pane (`HERDR_ENV=1`), `orca` inside an Orca terminal (`ORCA_TERMINAL_HANDLE`) while the Orca app runs, `tmux` inside tmux, else `manual`. An Orca terminal outlives the Orca app (its terminal host daemon keeps it), but new tabs need the app: when the app isn't running (no `orca-runtime.json`, or `orca terminal create` answers `runtime_unavailable`), `auto` uses tmux instead (a detached `coord` session outside tmux; `tmux attach -t coord`), or `manual` without tmux, and says so. An explicit `orca` backend fails with that reason. The setting stays `auto` in the project file and is resolved by each session, so one project can be run from Orca one day and from herdr the next. | As above |
+| `auto` | `nicotine` inside a nicotine agent (`NICOTINE_AGENT`), `herdr` inside a herdr pane (`HERDR_ENV=1`), `orca` inside an Orca terminal (`ORCA_TERMINAL_HANDLE`) while the Orca app runs, `tmux` inside tmux, else `manual`. An Orca terminal outlives the Orca app (its terminal host daemon keeps it), but new tabs need the app: when the app isn't running (no `orca-runtime.json`, or `orca terminal create` answers `runtime_unavailable`), `auto` uses tmux instead (a detached `coord` session outside tmux; `tmux attach -t coord`), or `manual` without tmux, and says so. An explicit `orca` backend fails with that reason. The setting stays `auto` in the project file and is resolved by each session, so one project can be run from Orca one day and from herdr the next. | As above |
+
+**nicotine agents run as kind `sh`**, so nicotine's Claude usage tracking does not cover them. `nicotine agent new claude -n <role> -- <args>` would keep it, but nicotine has no `--env` flag to carry the lane's env, and it would bypass `workerCommand`. coord will switch once nicotine gains `--env`.
 
 **herdr pane ids** (`w1:p3`) are stable while the herdr server runs but can be renumbered when it restarts. A herdr lane is therefore found by its terminal id first; its pane id counts only while that pane's tab still carries the lane's name. Every lane records its own backend, so lanes started under orca keep closing through orca after a project switches to herdr or `auto`.
 
@@ -102,7 +105,7 @@ Set them in `/config`, or in settings under `pluginConfigs["coordinator"].option
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `backend` | `manual` | `manual`, `auto`, `orca`, `herdr`, `tmux` or `wt` (see Backends). |
+| `backend` | `manual` | `manual`, `auto`, `orca`, `herdr`, `nicotine`, `tmux` or `wt` (see Backends). |
 | `shell` | `auto` | How `AGENT_BUS_ROLE` is set before the command: `auto` (PowerShell on Windows, POSIX elsewhere), `posix`, `powershell` or `cmd`. |
 | `workerCommand` | `claude --model {model} "{prompt}"` | The worker command template. |
 | `workerPrompt` | `Read {brief} and execute it. Your role is {role}.` | The worker's first prompt. |
@@ -157,7 +160,7 @@ The goal is to stop at about 80% of the weekly limit without losing work. Going 
   - It reuses a fresh reading when there is one.
   - Otherwise it opens a throwaway session (`probeCommand`, a cheap model), types `/usage`, reads the screen and closes it.
   - It probes every 60 minutes, every 20 minutes from 70% and every 10 minutes from 78% (`probeIntervals`).
-  - Screen reading needs the `orca`, `herdr` or `tmux` backend. With `wt` or `manual`, only the coordinator session's own readings are available.
+  - Screen reading needs the `orca`, `herdr`, `nicotine` or `tmux` backend. With `wt` or `manual`, only the coordinator session's own readings are available.
 - **At the threshold**, the watcher sends the coordinator an urgent bus message, once per crossing. Without agent-bus it appends to `<reportsDir>/alerts.jsonl` and prints. In the coordinator session the plugin adds a note and a toast.
 
 **`/coordinator pause`:**
