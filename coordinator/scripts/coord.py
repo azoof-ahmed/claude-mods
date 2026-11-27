@@ -542,12 +542,31 @@ def nicotine_remove(h, session=None, dry=False):
     return nicotine_json(['agent', 'rm', '--force', h], dry, session)[0].returncode == 0
 
 
+NICOTINE_IDENTITY = ('NICOTINE_AGENT', 'NICOTINE_BROWSER_TAB')  # name one agent; session, socket and bin don't
+
+
+def nicotine_line(cfg, role, repo, cmd, env=None):
+    """The `sh -c` line a nicotine agent runs. The daemon's environment reaches every agent it starts, so the line
+    first drops the inherited bus and coordinator identity: every AGENT_BUS_* and COORD_* variable, and each
+    NICOTINE_* variable in NICOTINE_IDENTITY still naming the spawner (nicotine sets the new agent's own). Only then
+    does it set the lane's env (none for a role-less probe), so the worker never answers to the coordinator's roles."""
+    env = os.environ if env is None else env
+    drop = ["for v in $(env | awk -F= '/^(AGENT_BUS|COORD)_[A-Za-z0-9_]*=/{print $1}'); do unset \"$v\" 2>/dev/null; done"]
+    for k in NICOTINE_IDENTITY:
+        if env.get(k):
+            drop.append(f'if [ "${{{k}-}}" = {shlex.quote(env[k])} ]; then unset {k} 2>/dev/null; fi')
+    # `;` after the drops: a variable that can't be unset (readonly) never stops the worker; a missing repo does
+    return '; '.join([f'cd {shlex.quote(repo)} || exit 1', *drop, with_env(cfg, role, cmd, 'posix') if role else cmd])
+
+
 def nicotine_start(cfg, role, repo, name, cmd, dry=False):
     """Start `cmd` in `repo` as the nicotine agent `name`; returns the agent dict, or raises SystemExit. An agent
     whose start output could not be read is found by its name and removed, so none is left behind."""
     before = set() if dry else nicotine_named(name)
-    line = f'cd {shlex.quote(repo)} && ' + (with_env(cfg, role, cmd, 'posix') if role else cmd)
-    r, res = nicotine_json(['agent', 'run', '-n', name, '--', 'sh', '-c', line], dry, cwd=repo)
+    # TODO: `nicotine agent new claude -n <name> -- <args>` would keep nicotine's claude usage tracking (this runs as
+    # kind `sh`), but it can't carry the lane env or the configured workerCommand; switch once nicotine has --env.
+    r, res = nicotine_json(['agent', 'run', '-n', name, '--', 'sh', '-c', nicotine_line(cfg, role, repo, cmd)],
+                           dry, cwd=repo)
     agent = res if isinstance(res, dict) else {}
     if agent.get('id') is None and not dry:
         if r.returncode == 0:

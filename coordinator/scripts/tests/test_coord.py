@@ -976,12 +976,44 @@ class CoordTest(unittest.TestCase):
         self.assertEqual(runc[5:7], ['sh', '-c'])
         line = runc[7]
         key = coord.lane_key(coord.Config(self.root), 'w1')
-        self.assertIn(f'cd {coord.shlex.quote(str(self.root))} && ', line)
+        self.assertTrue(line.startswith(f'cd {coord.shlex.quote(str(self.root))} || exit 1; '))
         self.assertIn(f'COORD_LANE={coord.shlex.quote(key)} AGENT_BUS_ROLE=w1 claude --model sonnet', line)
         self.assertEqual(agents[0]['cwd'], str(self.root))
         lane = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())['w1']
         self.assertEqual((lane['backend'], lane['handle'], lane['name'], lane['session']),
                          ('nicotine', '81', 'w1', 'nicotine'))
+
+    def test_nicotine_worker_drops_the_inherited_bus_and_coordinator_identity(self):
+        """The daemon's env reaches every agent: the wrapper unsets AGENT_BUS_*, COORD_* and the spawner's own
+        NICOTINE_AGENT/NICOTINE_BROWSER_TAB before the lane's env is set."""
+        self.run_cli('init', '--backend', 'nicotine')
+        cfg = coord.Config(self.root)
+        spawner = {'NICOTINE_AGENT': '79', 'NICOTINE_BROWSER_TAB': "coord's tab", 'NICOTINE_SESSION': 'work'}
+        line = coord.nicotine_line(cfg, 'w1', str(self.root), 'env', spawner)
+        lane_env = line.index('COORD_LANE=')
+        for drop in ("awk -F= '/^(AGENT_BUS|COORD)_[A-Za-z0-9_]*=/{print $1}'",
+                     'if [ "${NICOTINE_AGENT-}" = 79 ]; then unset NICOTINE_AGENT',
+                     'unset NICOTINE_BROWSER_TAB'):
+            self.assertIn(drop, line)
+            self.assertLess(line.index(drop), lane_env)
+        self.assertNotIn('NICOTINE_SESSION', line)  # the daemon's session names no agent: it stays
+        probe = coord.nicotine_line(cfg, None, str(self.root), 'claude --model haiku', spawner)
+        self.assertIn('unset NICOTINE_AGENT', probe)
+        self.assertNotIn('AGENT_BUS_ROLE=', probe)
+        if os.name == 'nt' or not coord.shutil.which('sh'):
+            return
+        # run it: an agent started by the daemon of a coordinator with bus roles (AGENT_BUS_ROLES, as seen live)
+        inherited = {k: v for k, v in os.environ.items()
+                     if not k.startswith(('AGENT_BUS_', 'COORD_', 'NICOTINE_'))}
+        inherited.update({'AGENT_BUS_ROLES': 'coordinator,scheduler', 'AGENT_BUS_ROLE': 'coordinator',
+                          'COORD_LANE': '/elsewhere#coordinator', 'COORD_WORKER_MODEL': 'opus',
+                          'NICOTINE_AGENT': '79', 'NICOTINE_BROWSER_TAB': 'w1', 'NICOTINE_SESSION': 'work'})
+        out = coord.subprocess.run(['sh', '-c', line], env=inherited, capture_output=True, text=True).stdout
+        got = dict(ln.split('=', 1) for ln in out.splitlines()
+                   if ln.split('=', 1)[0].startswith(('AGENT_BUS_', 'COORD_', 'NICOTINE_')))
+        self.assertEqual(got, {'AGENT_BUS_ROLE': 'w1', 'COORD_LANE': coord.lane_key(cfg, 'w1'),
+                               'NICOTINE_BROWSER_TAB': 'w1',  # nicotine's own value for the new agent: kept
+                               'NICOTINE_SESSION': 'work'})
 
     def test_nicotine_unreadable_start_removes_the_new_agent_by_name(self):
         self.run_cli('init', '--backend', 'nicotine')
@@ -1070,7 +1102,7 @@ class CoordTest(unittest.TestCase):
             self.assertEqual(coord.probe_usage(cfg), {'session': 12, 'week': 34})
         runc = next(c for c in calls if c[:2] == ['agent', 'run'])
         self.assertEqual(runc[2:4], ['-n', 'usage-probe'])
-        self.assertTrue(runc[-1].endswith('&& claude --model haiku'))
+        self.assertTrue(runc[-1].endswith('; claude --model haiku'))
         self.assertNotIn('AGENT_BUS_ROLE', runc[-1])
         self.assertIn(['agent', 'send', '-s', 'nicotine', '81', '/usage'], calls)
         self.assertIn(['agent', 'read', '-s', 'nicotine', '81', '--scrollback', str(coord.NICOTINE_SCROLLBACK)], calls)
