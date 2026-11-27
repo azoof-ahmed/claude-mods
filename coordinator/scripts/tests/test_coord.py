@@ -14,11 +14,13 @@ sys.path.insert(0, str(SCRIPTS))
 import coord  # noqa: E402
 
 REAL_HERDR_PANES = coord.herdr_panes
+REAL_NICOTINE_AGENTS = coord.nicotine_agents
 
 CLEAN = {coord.env_key(k): '' for k in coord.DEFAULTS}
 CLEAN.update({'AGENT_BUS_ROLE': '', 'COORD_LANE': '', 'CLAUDE_CONFIG_DIR': os.devnull, 'AGENT_BUS_CLI': os.devnull + '-missing',
-              # the tests run inside Orca, herdr or tmux: none of that may leak into `auto`
-              'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': ''})
+              # the tests run inside Orca, herdr, nicotine or tmux: none of that may leak into `auto`
+              'HERDR_ENV': '', 'HERDR_PANE_ID': '', 'ORCA_TERMINAL_HANDLE': '', 'TMUX': '',
+              'NICOTINE_AGENT': ''})
 
 
 class CoordTest(unittest.TestCase):
@@ -41,8 +43,11 @@ class CoordTest(unittest.TestCase):
         self.noorca.start()
         self.noherdr = mock.patch.object(coord, 'herdr_panes', lambda dry=False: None)
         self.noherdr.start()
+        self.nonicotine = mock.patch.object(coord, 'nicotine_agents', lambda session=None, dry=False: None)
+        self.nonicotine.start()
 
     def tearDown(self):
+        self.nonicotine.stop()
         self.noherdr.stop()
         self.noorca.stop()
         self.notmux.stop()
@@ -657,7 +662,7 @@ class CoordTest(unittest.TestCase):
         self.assertEqual(cfg.backend, 'manual')
         code, out = self.run_cli('lanes', '--backend', 'kitty')
         self.assertNotEqual(code, 0)
-        self.assertIn('auto, orca, herdr, tmux, wt or manual', out)
+        self.assertIn('auto, orca, herdr, nicotine, tmux, wt or manual', out)
 
     def test_auto_skips_orca_when_its_app_is_not_running(self):
         d = coord.detect_backend
@@ -899,6 +904,188 @@ class CoordTest(unittest.TestCase):
         cfg = coord.Config(self.root)
         other = dict(got[0], role='w2')  # another lane's session that happens to carry the same (reused) pane id
         self.assertEqual(coord.lane_sessions(cfg, {'role': 'w1', 'handle': 'w1:p3'}, [other]), [])
+
+    # ---- nicotine
+
+    def fake_nicotine(self, calls, agents, start_ok=True):
+        """A nicotine daemon: `agents` is its agent list (mutated by run/kill/rm); calls drop the `nicotine --json`."""
+        n = {'id': 80}
+
+        def run(argv, dry=False, **kw):
+            self.assertEqual(argv[:2], ['nicotine', '--json'])
+            a = argv[2:]
+            calls.append(a)
+            out, rc = '', 0
+            if a[:2] == ['agent', 'ls']:
+                sess = a[a.index('-s') + 1] if '-s' in a else 'nicotine'
+                out = json.dumps([x for x in agents if x.get('session', 'nicotine') == sess])
+            elif a[:2] == ['agent', 'run']:
+                n['id'] += 1
+                x = {'id': str(n['id']), 'name': a[a.index('-n') + 1], 'live': True, 'session': 'nicotine',
+                     'argv': a[a.index('--') + 1:], 'cwd': kw.get('cwd')}
+                agents.append(x)
+                out = json.dumps(x) if start_ok else 'garbled'
+            elif a[:2] == ['agent', 'kill']:
+                for x in agents:
+                    if x['id'] == a[2]:
+                        x['live'] = False
+                out = json.dumps({'agent': a[2], 'killed': True})
+            elif a[:2] == ['agent', 'rm']:
+                h = a[-1]
+                rc = 0 if any(x['id'] == h for x in agents) else 1
+                agents[:] = [x for x in agents if x['id'] != h]
+                out = json.dumps({'removed': h})
+            elif a[:2] == ['agent', 'read']:
+                out = json.dumps({'agent': a[2], 'status': 'idle',
+                                  'text': 'Current session  12% used\nCurrent week (all models)  34% used\n'})
+            elif a[:2] == ['agent', 'send']:
+                out = json.dumps({'agent': a[2], 'sent': True})
+            return coord.subprocess.CompletedProcess(argv, rc, out, '')
+        return run
+
+    def nicotine_on(self, run):
+        return (mock.patch.multiple(coord, run=run, nicotine_agents=REAL_NICOTINE_AGENTS),
+                mock.patch.object(coord.shutil, 'which', lambda n: '/bin/' + n))
+
+    def test_auto_picks_nicotine_inside_a_nicotine_agent(self):
+        d = coord.detect_backend
+        self.assertEqual(d({'NICOTINE_AGENT': '12', 'HERDR_ENV': '1', 'HERDR_PANE_ID': 'w1:p1', 'TMUX': '/tmp/t'}),
+                         'nicotine')
+        self.assertEqual(d({'NICOTINE_AGENT': ''}), 'manual')
+
+    def test_nicotine_dry_run_shows_the_agent_run_command(self):
+        self.run_cli('init')
+        _, out = self.run_cli('spawn', 'w', '--backend', 'nicotine', '--dry-run')
+        self.assertIn('would run: nicotine --json agent run -n w -- sh -c', out)
+        self.assertIn('AGENT_BUS_ROLE=w', out)
+        self.assertIn('claude --model opus', out)
+        self.assertFalse(json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text()))
+        _, out = self.run_cli('usage', '--probe', '--dry-run', '--backend', 'nicotine')
+        self.assertIn('agent run -n usage-probe', out)
+        self.assertIn('claude --model haiku', out)
+
+    def test_nicotine_spawn_runs_the_worker_command_with_the_lane_env_and_records_the_agent(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        calls, agents = [], []
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2:
+            code, out = self.run_cli('spawn', 'w1', '--model', 'sonnet')
+        self.assertEqual(code, 0, out)
+        runc = next(c for c in calls if c[:2] == ['agent', 'run'])
+        self.assertEqual(runc[:5], ['agent', 'run', '-n', 'w1', '--'])
+        self.assertEqual(runc[5:7], ['sh', '-c'])
+        line = runc[7]
+        key = coord.lane_key(coord.Config(self.root), 'w1')
+        self.assertIn(f'cd {coord.shlex.quote(str(self.root))} && ', line)
+        self.assertIn(f'COORD_LANE={coord.shlex.quote(key)} AGENT_BUS_ROLE=w1 claude --model sonnet', line)
+        self.assertEqual(agents[0]['cwd'], str(self.root))
+        lane = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())['w1']
+        self.assertEqual((lane['backend'], lane['handle'], lane['name'], lane['session']),
+                         ('nicotine', '81', 'w1', 'nicotine'))
+
+    def test_nicotine_unreadable_start_removes_the_new_agent_by_name(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        calls, agents = [], [{'id': '7', 'name': 'w1', 'live': True}]  # an older agent with the name stays
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents, start_ok=False))
+        with p1, p2:
+            code, out = self.run_cli('spawn', 'w1')
+        self.assertNotEqual(code, 0)
+        self.assertEqual([c for c in calls if c[:2] in (['agent', 'kill'], ['agent', 'rm'])],
+                         [['agent', 'kill', '81'], ['agent', 'rm', '--force', '81']])
+        self.assertEqual([a['id'] for a in agents], ['7'])
+        self.assertFalse(json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text()))
+
+    def test_nicotine_close_kills_and_removes_only_the_agent_coord_started(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        cfg = coord.Config(self.root)
+        lane = {'role': 'w1', 'backend': 'nicotine', 'handle': '81', 'name': 'w1', 'session': 'work'}
+        calls, agents = [], [{'id': '81', 'name': 'w1', 'live': True, 'session': 'work'}]
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2, redirect_stdout(io.StringIO()):
+            self.assertTrue(coord.close_terminal(cfg, lane))
+        self.assertEqual([c for c in calls if c[:2] != ['agent', 'ls']],
+                         [['agent', 'kill', '-s', 'work', '81'], ['agent', 'rm', '-s', 'work', '--force', '81']])
+        self.assertEqual(agents, [])
+        # the id now names someone else's agent: nothing is killed
+        calls, agents = [], [{'id': '81', 'name': 'other', 'live': True, 'session': 'work'}]
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2, redirect_stdout(io.StringIO()):
+            self.assertTrue(coord.close_terminal(cfg, lane))
+        self.assertEqual([c for c in calls if c[:2] != ['agent', 'ls']], [])
+        # nicotine unreachable: nothing claimed
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertFalse(coord.close_terminal(cfg, lane))
+        self.assertIn('nicotine is not reachable', out.getvalue())
+
+    def test_nicotine_respawn_closes_the_old_agent_and_starts_a_successor(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        (self.root / '.claude/coord/lanes/lanes.json').write_text(json.dumps({'w1': {
+            'role': 'w1', 'backend': 'nicotine', 'handle': '50', 'name': 'w1', 'session': 'nicotine',
+            'state': 'live', 'repo': str(self.root), 'generation': 1}}))
+        calls, agents = [], [{'id': '50', 'name': 'w1', 'live': True}]
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2:
+            code, out = self.run_cli('respawn', 'w1')
+        self.assertEqual(code, 0, out)
+        self.assertIn(['agent', 'rm', '-s', 'nicotine', '--force', '50'], calls)
+        self.assertEqual([a['id'] for a in agents], ['81'])
+        lane = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())['w1']
+        self.assertEqual((lane['handle'], lane['generation'], lane['state']), ('81', 2, 'live'))
+
+    def test_nicotine_status_reconciles_by_live_agents(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        lanes = {'gone': {'role': 'gone', 'backend': 'nicotine', 'handle': '5', 'session': 'nicotine', 'state': 'live'},
+                 'up': {'role': 'up', 'backend': 'nicotine', 'handle': '6', 'session': 'nicotine', 'state': 'live'},
+                 'other': {'role': 'other', 'backend': 'nicotine', 'handle': '9', 'session': 's2', 'state': 'live'}}
+        (self.root / '.claude/coord/lanes/lanes.json').write_text(json.dumps(lanes))
+        agents = [{'id': '5', 'name': 'gone', 'live': False}, {'id': '6', 'name': 'up', 'live': True},
+                  {'id': '9', 'name': 'other', 'live': True, 'session': 's2'}]
+        calls = []
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2:
+            _, out = self.run_cli('status')
+        self.assertIn('marked closed: gone', out)
+        saved = json.loads((self.root / '.claude/coord/lanes/lanes.json').read_text())
+        self.assertEqual([saved[r]['state'] for r in ('gone', 'up', 'other')], ['closed', 'live', 'live'])
+        self.assertIn(['agent', 'ls', '-s', 's2'], calls)
+
+    def test_nicotine_close_idle_closes_a_safe_lane(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        (self.root / '.claude/coord/lanes/lanes.json').write_text(json.dumps({'w1': {
+            'role': 'w1', 'backend': 'nicotine', 'handle': '81', 'name': 'w1', 'state': 'live'}}))
+        (self.root / '.claude/coord/lanes/w1.md').write_text('## State\ndone\nSAFE TO CLOSE\n')
+        calls, agents = [], [{'id': '81', 'name': 'w1', 'live': True}]
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2:
+            _, out = self.run_cli('close-idle')
+        self.assertIn('closed: w1', out)
+        self.assertIn(['agent', 'rm', '--force', '81'], calls)
+
+    def test_nicotine_probe_reads_the_screen_and_removes_its_agent(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        cfg = coord.Config(self.root)
+        calls, agents = [], []
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2, mock.patch.object(coord.time, 'sleep', lambda s: None):
+            self.assertEqual(coord.probe_usage(cfg), {'session': 12, 'week': 34})
+        runc = next(c for c in calls if c[:2] == ['agent', 'run'])
+        self.assertEqual(runc[2:4], ['-n', 'usage-probe'])
+        self.assertTrue(runc[-1].endswith('&& claude --model haiku'))
+        self.assertNotIn('AGENT_BUS_ROLE', runc[-1])
+        self.assertIn(['agent', 'send', '-s', 'nicotine', '81', '/usage'], calls)
+        self.assertIn(['agent', 'read', '-s', 'nicotine', '81', '--scrollback', str(coord.NICOTINE_SCROLLBACK)], calls)
+        self.assertIn(['agent', 'rm', '-s', 'nicotine', '--force', '81'], calls)
+        self.assertEqual(agents, [])
+
+    def test_nicotine_interrupt_sends_escape_then_closes(self):
+        self.run_cli('init', '--backend', 'nicotine')
+        cfg = coord.Config(self.root)
+        calls, agents = [], [{'id': '81', 'name': 'w1', 'live': True}]
+        p1, p2 = self.nicotine_on(self.fake_nicotine(calls, agents))
+        with p1, p2, redirect_stdout(io.StringIO()):
+            coord.interrupt(cfg, {'role': 'w1', 'backend': 'nicotine', 'handle': '81', 'name': 'w1'})
+        self.assertIn(['agent', 'send', '81', '--no-enter', '-k', 'esc'], calls)
+        self.assertIn(['agent', 'rm', '--force', '81'], calls)
 
 
 class BusCliTest(unittest.TestCase):

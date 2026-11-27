@@ -47,7 +47,7 @@ TEMPLATES = HERE.parent / 'templates'
 
 DEFAULTS = {
     'repos': '.',
-    'backend': 'manual',              # auto | orca | herdr | tmux | wt | manual
+    'backend': 'manual',              # auto | orca | herdr | nicotine | tmux | wt | manual
     'shell': 'auto',                  # auto | posix | powershell | cmd: how the env prefix is written
     'workerCommand': 'claude --model {model} "{prompt}"',
     'workerPrompt': 'Read {brief} and execute it. Your role is {role}.',
@@ -73,7 +73,7 @@ INTS = ('maxLanes', 'retireTokens', 'pauseSessionPercent', 'pauseWeeklyPercent',
 FLOATS_EXTRA = ('pauseReminderMin', 'pauseGraceMin')
 FLOATS = ('minFreeRamGb',)
 PATHS = ('busDir', 'trackerDb', 'rulesFile', 'briefsDir', 'cardsDir', 'reportsDir')
-BACKENDS = ('auto', 'orca', 'herdr', 'tmux', 'wt', 'manual')
+BACKENDS = ('auto', 'orca', 'herdr', 'nicotine', 'tmux', 'wt', 'manual')
 
 
 def orca_runtime_path():
@@ -104,10 +104,13 @@ def tmux_or_manual(env=None):
 
 
 def detect_backend(env=None, orca_up=None):
-    """`auto`: herdr inside a herdr pane (HERDR_ENV=1), orca inside an Orca terminal while the Orca app runs, tmux
-    inside tmux, else manual. herdr is checked first: a herdr pane that runs the agent inside tmux (claude-auto-retry)
-    still has HERDR_ENV. An Orca terminal whose app isn't running falls back to tmux (or manual without tmux)."""
+    """`auto`: nicotine inside a nicotine agent (NICOTINE_AGENT), herdr inside a herdr pane (HERDR_ENV=1), orca inside
+    an Orca terminal while the Orca app runs, tmux inside tmux, else manual. nicotine and herdr are checked first: an
+    agent that runs inside tmux (claude-auto-retry) or a herdr pane still has their marker. An Orca terminal whose app
+    isn't running falls back to tmux (or manual without tmux)."""
     env = os.environ if env is None else env
+    if env.get('NICOTINE_AGENT'):
+        return 'nicotine'
     if env.get('HERDR_ENV') == '1' and env.get('HERDR_PANE_ID'):
         return 'herdr'
     if env.get('ORCA_TERMINAL_HANDLE'):
@@ -323,8 +326,8 @@ def lane_key(cfg, role):
     return f'{cfg.root.resolve().as_posix()}#{role}'
 
 
-def with_env(cfg, role, cmd):
-    kind = shell_kind(cfg)
+def with_env(cfg, role, cmd, kind=None):
+    kind = kind or shell_kind(cfg)
     key = lane_key(cfg, role)
     if kind == 'powershell':
         return f"$env:COORD_LANE='{key}'; $env:AGENT_BUS_ROLE='{role}'; {cmd}"
@@ -499,6 +502,91 @@ def herdr_screen(h, dry=False):
     return out
 
 
+# ---- nicotine: a lane is a nicotine agent named after its role. `agent run` starts the configured workerCommand as
+# is (its model, prompt and lane env intact); the nicotine daemon starts it, so the caller's environment never reaches
+# it and a posix shell sets the env and the cwd. The handle is the agent id; the lane also keeps the agent's name and
+# session, and coord only kills or removes an agent whose id still carries that name: one coord started.
+
+NICOTINE_OPENED = {}  # agent id -> {'name', 'session'} for the agents open_terminal started in this process
+NICOTINE_SCROLLBACK = 40  # lines of scrollback read with the screen when probing /usage
+
+
+def nicotine_json(argv, dry=False, session=None, **kw):
+    """(CompletedProcess, parsed JSON or None) for `nicotine --json <argv>` (in `session` when given)."""
+    # the session goes right after `agent <verb>`: anything after `agent run ... --` is the agent's command
+    r = run(['nicotine', '--json', *argv[:2], *(['-s', session] if session else []), *argv[2:]], dry, **kw)
+    try:
+        return r, json.loads(r.stdout or 'null')
+    except ValueError:
+        return r, None
+
+
+def nicotine_agents(session=None, dry=False):
+    """Every agent of the nicotine session (default: the caller's) as dicts, or None when nicotine can't be asked."""
+    if dry or not shutil.which('nicotine'):
+        return None
+    r, res = nicotine_json(['agent', 'ls'], session=session)
+    if r.returncode != 0 or not isinstance(res, list):
+        return None
+    return [a for a in res if isinstance(a, dict)]
+
+
+def nicotine_named(name, session=None):
+    """Ids of the agents named `name`."""
+    return {str(a['id']) for a in nicotine_agents(session) or [] if a.get('name') == name and a.get('id') is not None}
+
+
+def nicotine_remove(h, session=None, dry=False):
+    """Kill agent `h`, then remove it from nicotine; True when it is gone."""
+    nicotine_json(['agent', 'kill', h], dry, session)
+    return nicotine_json(['agent', 'rm', '--force', h], dry, session)[0].returncode == 0
+
+
+def nicotine_start(cfg, role, repo, name, cmd, dry=False):
+    """Start `cmd` in `repo` as the nicotine agent `name`; returns the agent dict, or raises SystemExit. An agent
+    whose start output could not be read is found by its name and removed, so none is left behind."""
+    before = set() if dry else nicotine_named(name)
+    line = f'cd {shlex.quote(repo)} && ' + (with_env(cfg, role, cmd, 'posix') if role else cmd)
+    r, res = nicotine_json(['agent', 'run', '-n', name, '--', 'sh', '-c', line], dry, cwd=repo)
+    agent = res if isinstance(res, dict) else {}
+    if agent.get('id') is None and not dry:
+        if r.returncode == 0:
+            for h in sorted(nicotine_named(name) - before):
+                nicotine_remove(h)
+        raise SystemExit(f'coordinator: nicotine agent run failed: {(r.stderr or "").strip() or (r.stdout or "").strip()}')
+    return {**agent, 'id': str(agent['id']) if agent.get('id') is not None else '<agent>'}
+
+
+def nicotine_live_handles(sessions, dry=False):
+    """Ids of every live agent in these nicotine sessions, or None when nicotine can't be asked."""
+    out = set()
+    for s in sessions:
+        agents = nicotine_agents(s, dry)
+        if agents is None:
+            return None
+        out |= {str(a['id']) for a in agents if a.get('live') and a.get('id') is not None}
+    return out
+
+
+def nicotine_locate(lane, dry=False):
+    """The agent of a nicotine lane: its id, while it still carries the lane's name. {} when it is gone (or the id is
+    another agent's), None when nicotine can't be asked."""
+    agents = nicotine_agents(lane.get('session'), dry)
+    if agents is None:
+        return None
+    h, name = lane.get('handle'), lane.get('name') or lane.get('role')
+    a = next((a for a in agents if h and str(a.get('id')) == str(h)), None)
+    return a if a and (not name or a.get('name') == name) else {}
+
+
+def nicotine_screen(h, session=None, dry=False):
+    """The screen (and some scrollback) of nicotine agent `h` as text."""
+    r, res = nicotine_json(['agent', 'read', h, '--scrollback', str(NICOTINE_SCROLLBACK)], dry, session)
+    text = res.get('text') if isinstance(res, dict) and isinstance(res.get('text'), str) else (r.stdout or '')
+    save_debug(r.stdout, text)
+    return text
+
+
 def open_terminal(cfg, role, repo, cmd, dry=False, backend=None):
     """Start `cmd` for `role` in a new terminal; returns (handle, how). The worker's env carries AGENT_BUS_ROLE."""
     b = backend or cfg.backend
@@ -516,6 +604,13 @@ def open_terminal(cfg, role, repo, cmd, dry=False, backend=None):
         if handle:
             HERDR_OPENED[handle] = {'tab': pane.get('tab_id'), 'terminal': pane.get('terminal_id')}
         return handle, 'herdr'
+    if b == 'nicotine':
+        agent = nicotine_start(cfg, role, repo, role, cmd, dry)
+        if not dry:
+            NICOTINE_OPENED[agent['id']] = {'name': agent.get('name'), 'session': agent.get('session')}
+            print(f'coordinator: {role} runs as nicotine agent {agent.get("name") or role} ({agent["id"]}): '
+                  f'`nicotine attach {agent["id"]}` to watch it.')
+        return agent['id'], 'nicotine'
     if b == 'orca':
         # Open a plain shell, then type the worker command into it. `create --command <interactive TUI>` makes
         # orca time out waiting for the handle ("Timed out waiting for terminal handle after creation") once
@@ -581,6 +676,17 @@ def close_terminal(cfg, lane, dry=False):
                 ok = True  # the tab is already gone
             else:
                 ok = run(['herdr', 'tab', 'close', pane.get('tab_id') or pane['pane_id']]).returncode == 0
+    elif how == 'nicotine' and h:
+        if dry:
+            ok = nicotine_remove(h, lane.get('session'), dry)
+        else:
+            agent = nicotine_locate(lane)
+            if agent is None:
+                print(f'{lane.get("role")}: nicotine is not reachable; stop agent {h} yourself.')
+            elif not agent:
+                ok = True  # the agent is already gone
+            else:
+                ok = nicotine_remove(str(agent['id']), lane.get('session'))
     elif how == 'tmux' and h:
         ok = run(['tmux', 'kill-window', '-t', h], dry).returncode == 0
     else:
@@ -735,19 +841,26 @@ def orca_live_handles(dry=False):
 
 
 def live_handles(lanes, dry=False):
-    """Handles of every live terminal of the backends these lanes use (orca handles; herdr pane and terminal ids),
-    or None when no lane has one or a backend can't be asked: liveness is then unknown, so nothing is reconciled."""
-    used = {l.get('backend') for l in lanes.values() if l.get('handle')} & {'orca', 'herdr'}
+    """Handles of every live terminal of the backends these lanes use (orca handles; herdr pane and terminal ids;
+    nicotine agent ids), or None when no lane has one or a backend can't be asked: liveness is then unknown, so
+    nothing is reconciled."""
+    used = {l.get('backend') for l in lanes.values() if l.get('handle')} & set(TRACKED)
     if not used:
         return None
+    sessions = sorted({l.get('session') or '' for l in lanes.values()
+                       if l.get('backend') == 'nicotine' and l.get('handle')})
     out = set()
-    for b, ask in (('orca', orca_live_handles), ('herdr', herdr_live_handles)):
+    for b, ask in (('orca', orca_live_handles), ('herdr', herdr_live_handles),
+                   ('nicotine', lambda dry: nicotine_live_handles([s or None for s in sessions], dry))):
         if b in used:
             got = ask(dry)
             if got is None:
                 return None
             out |= got
     return out
+
+
+TRACKED = ('orca', 'herdr', 'nicotine')  # backends whose live terminals coord can list (status reconciles them)
 
 
 def lane_alive(lane, handles):
@@ -927,7 +1040,7 @@ def cmd_spawn(cfg, args):
             lanes[role] = before
         save_lanes(cfg, lanes)
         raise
-    if handle and how in ('orca', 'herdr'):
+    if handle and how in ('orca', 'herdr'):  # agent-bus can reach these terminals by handle
         bus(cfg, 'register', role, '--handle', handle, '--kind', 'claude', '--mode', 'file')
     elif bus_cli() and cfg.path('busDir').is_dir():
         bus(cfg, 'register', role, '--kind', 'claude', '--mode', 'file')
@@ -936,6 +1049,8 @@ def cmd_spawn(cfg, args):
     lanes[role] = {**opened, **lanes.get(role, {}), 'backend': how, 'handle': handle}
     if how == 'herdr' and handle in HERDR_OPENED:
         lanes[role].update({k: v for k, v in HERDR_OPENED[handle].items() if v})
+    if how == 'nicotine' and handle in NICOTINE_OPENED:
+        lanes[role].update({k: v for k, v in NICOTINE_OPENED[handle].items() if v})
     save_lanes(cfg, lanes)
     print(f'{role}: started (generation {gen}, {how}{" " + handle if handle else ""}) on {brief}')
     return 0
@@ -1042,13 +1157,13 @@ def cmd_lanes(cfg, args):
 
 
 def reconcile(cfg, lanes, sessions, handles):
-    """Mark closed every live orca or herdr lane whose terminal is gone and that no tmux session still runs; returns
-    them."""
+    """Mark closed every live orca, herdr or nicotine lane whose terminal is gone and that no tmux session still runs;
+    returns them."""
     if handles is None:
         return []
     gone = []
     for role, lane in lanes.items():
-        if (lane.get('state') in ('live', 'retiring') and lane.get('backend') in ('orca', 'herdr')
+        if (lane.get('state') in ('live', 'retiring') and lane.get('backend') in TRACKED
                 and lane.get('handle') and not lane_alive(lane, handles) and not lane_sessions(cfg, lane, sessions)):
             lane['state'] = 'closed'
             lane['retired'] = now()
@@ -1428,7 +1543,8 @@ def probe_interval_min(cfg, week):
 
 
 def probe_usage(cfg, dry=False):
-    """Read /usage from a throwaway Claude Code session in a terminal the backend can read back (orca, herdr, tmux).
+    """Read /usage from a throwaway Claude Code session in a terminal the backend can read back (orca, herdr,
+    nicotine, tmux).
 
     The session runs `probeCommand` (a cheap model), gets `/usage` typed, has its screen read, and is closed.
     No task work happens in it. Returns {'session','week'} or raises SystemExit when the backend cannot read a screen.
@@ -1457,6 +1573,27 @@ def probe_usage(cfg, dry=False):
             closed = bool(pane.get('tab_id')) and run(['herdr', 'tab', 'close', pane['tab_id']]).returncode == 0
             if not closed:
                 herdr_close_by_label(ws, 'usage-probe', before)
+        return parse_usage(screen)
+    if b == 'nicotine':
+        if dry:
+            nicotine_start(cfg, None, repo, 'usage-probe', cfg['probeCommand'], dry=True)
+            return {'session': None, 'week': None}
+        h, session = None, None
+        before = nicotine_named('usage-probe')
+        try:
+            agent = nicotine_start(cfg, None, repo, 'usage-probe', cfg['probeCommand'])
+            h, session = agent['id'], agent.get('session')
+            time.sleep(PROBE_START_S)
+            nicotine_json(['agent', 'send', h, '/usage'], session=session)
+            screen = wait_for_usage(lambda: nicotine_screen(h, session))
+            nicotine_json(['agent', 'send', h, '--no-enter', '-k', 'esc'], session=session)
+            nicotine_json(['agent', 'send', h, '/exit'], session=session)
+            time.sleep(2)
+        finally:  # whatever failed, the probe agent never outlives the probe
+            removed = h is not None and nicotine_remove(h, session)
+            if not removed:
+                for left in sorted(nicotine_named('usage-probe') - before):
+                    nicotine_remove(left)
         return parse_usage(screen)
     if b == 'orca':
         if dry:
@@ -1550,7 +1687,7 @@ def cmd_usage(cfg, args):
         return 0
     if not rec:
         print('no usage reading yet: the plugin records the coordinator session\'s readings; `usage --probe` reads '
-              '/usage through the backend (orca, herdr, tmux)')
+              '/usage through the backend (orca, herdr, nicotine, tmux)')
         return 1
     age = int((time.time() - rec.get('time', 0)) / 60)
     print(f"week {rec.get('week')}% (pause at {cfg['pauseWeeklyPercent']}%), session {rec.get('session')}% "
@@ -1638,7 +1775,8 @@ def tell(cfg, role, text, prio='urgent'):
 
 
 def interrupt(cfg, lane, dry=False):
-    """Stop a lane that did not answer: an Escape to the agent first (orca, herdr, tmux), then close its terminal."""
+    """Stop a lane that did not answer: an Escape to the agent first (orca, herdr, nicotine, tmux), then close its
+    terminal."""
     h, how = lane.get('handle'), lane.get('backend')
     if how == 'orca' and h:
         run(['orca', 'terminal', 'send', '--terminal', h, '--text', '\x1b'], dry)
@@ -1646,6 +1784,10 @@ def interrupt(cfg, lane, dry=False):
         pane = {'pane_id': lane.get('handle')} if dry else herdr_locate(lane)
         if pane:
             run(['herdr', 'pane', 'send-keys', pane['pane_id'], 'esc'], dry)
+    elif how == 'nicotine' and h:
+        agent = {'id': h} if dry else nicotine_locate(lane)
+        if agent:
+            nicotine_json(['agent', 'send', str(agent['id']), '--no-enter', '-k', 'esc'], dry, lane.get('session'))
     elif how == 'tmux' and h:
         run(['tmux', 'send-keys', '-t', h, 'Escape'], dry)
     return close_terminal(cfg, lane, dry)
