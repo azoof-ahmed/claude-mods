@@ -218,21 +218,32 @@ class CoordPathsTest(Places):
             for f in flags:
                 self.assertIsNone(coord.flag_error(verb, [f.rstrip('=')] + (['v'] if f.endswith('=') else [])))
 
-    def test_environment_paths_outside_the_project_are_refused(self):
+    def test_an_inherited_path_of_another_project_is_ignored(self):
         for key in (*coord.PATHS, 'repos'):
             var = coord.env_key(key)
             for value in (str(self.alpha / 'x'), '../alpha/x'):
-                code, _, err = self.unchanged(self.beta, 'init', **{var: value})
-                self.assertEqual(code, 2, key)
-                for part in (key, var, str(self.beta / '.claude' / 'claude-mods.json')):
+                code, cfg, err = self.config(self.beta, **{var: value})
+                self.assertEqual((code, cfg[key]), (0, coord.DEFAULTS[key]), key)
+                for part in ('ignoring ' + key, var, str(self.beta / '.claude' / 'claude-mods.json')):
                     self.assertIn(part, err)
-        self.assertEqual(self.config(self.beta, COORD_REPOS=f'.,{self.alpha}')[0], 2)
+        code, cfg, _ = self.config(self.beta, COORD_REPOS=f'.,{self.alpha}')
+        self.assertEqual((code, cfg['repos']), (0, '.'))
 
-    def test_the_context_hook_says_why(self):
-        code, out, _ = self.unchanged(self.beta, 'context', COORD_CARDS_DIR=str(self.alpha / 'x'))
+    def test_the_per_workspace_map_applies_only_inside_its_path(self):
+        (self.home / '.claude' / 'claude-mods.json').write_text(json.dumps({'workspaces': {
+            str(self.home / 'b*'): {'coordinator': {'maxLanes': 2}},
+            str(self.beta): {'coordinator': {'maxLanes': 5, 'cardsDir': 'mapped'}}}}))
+        cfg = self.config(self.beta, COORD_MAX_LANES='9')[1]
+        self.assertEqual((cfg['maxLanes'], cfg['cardsDir']), (5, 'mapped'))
+        self.assertEqual(self.config(self.alpha, COORD_MAX_LANES='9')[1]['maxLanes'], 9)
+        self.section(self.beta, 'coordinator', maxLanes=1)
+        self.assertEqual(self.config(self.beta)[1]['maxLanes'], 1)
+
+    def test_the_context_hook_ignores_another_projects_path(self):
+        code, out, err = self.unchanged(self.beta, 'context', COORD_CARDS_DIR=str(self.alpha / 'x'))
         self.assertEqual(code, 0)
         self.assertFalse(json.loads(out)['configured'])
-        self.assertIn('cardsDir', json.loads(out)['refused'])
+        self.assertIn('ignoring cardsDir', err)
 
     def test_environment_paths_inside_still_work_with_a_warning(self):
         code, cfg, err = self.config(self.beta, COORD_BUS_DIR='tmp/bus')
@@ -243,16 +254,16 @@ class CoordPathsTest(Places):
     def old_option(self, name, **options):
         (self.home / '.claude' / 'settings.json').write_text(json.dumps({'pluginConfigs': {name: {'options': options}}}))
 
-    def test_old_options_warn_inside_and_are_refused_outside(self):
+    def test_old_options_warn_inside_and_are_ignored_outside(self):
         for name in ('coordinator', 'coordinator@claude-mods'):
             self.old_option(name, busDir='tmp/bus')
             code, cfg, err = self.config(self.beta)
             self.assertEqual((code, cfg['busDir']), (0, 'tmp/bus'))
             self.assertIn('busDir comes from a plugin option', err)
             self.old_option(name, cardsDir=str(self.alpha / 'cards'), maxLanes=1)
-            code, _, err = self.unchanged(self.beta, 'init')
-            self.assertEqual(code, 2)
-            self.assertIn('refusing cardsDir', err)
+            code, cfg, err = self.config(self.beta)
+            self.assertEqual((code, cfg['cardsDir']), (0, coord.DEFAULTS['cardsDir']))
+            self.assertIn('ignoring cardsDir', err)
         self.section(self.beta, 'coordinator', cardsDir='mine')
         self.assertEqual(self.config(self.beta)[1]['cardsDir'], 'mine')
         self.old_option('another', cardsDir=str(self.alpha / 'cards'))

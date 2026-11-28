@@ -1,6 +1,6 @@
 {
   "name": "task-tracker",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A shared task tracker for agents and people working in one repository: claim tasks, declare the files you touch, get refused on overlaps, review. /tasks board pane, status line, a band for conflicts and reviews, toasts for blocked tasks.",
   "author": {
     "name": "Azoof Ahmed"

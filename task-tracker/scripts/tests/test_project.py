@@ -214,14 +214,26 @@ class TaskPathsTest(Places):
         for args in (['init', '--no-role'], ['init', '--force'], ['list', '-x'], ['--nope', 'list']):
             self.assertEqual(self.unchanged(self.alpha, *args)[0], 2, args)
 
-    def test_environment_paths_outside_the_project_are_refused(self):
-        for key, var in (('dbPath', 'TASKS_DB'), ('rolesFile', 'TASKS_ROLES')):
-            for value in (str(self.alpha / 'x.py'), '../alpha/x.py'):
-                for verb in (['init'], ['list'], ['where']):
-                    code, _, err = self.unchanged(self.beta, *verb, **{var: value})
-                    self.assertEqual(code, 2, (key, verb))
-                    for part in (key, var, str(self.beta / '.claude' / 'claude-mods.json')):
-                        self.assertIn(part, err)
+    def test_an_inherited_path_of_another_project_is_ignored(self):
+        # e.g. TASKS_DB handed down from a session in alpha (a terminal or daemon started there)
+        for key, var, default in (('dbPath', 'TASKS_DB', '.claude/tasks/tasks.db'), ('rolesFile', 'TASKS_ROLES', '.claude/tasks/roles.toml')):
+            for value in (str(self.alpha / 'x.db'), '../alpha/x.db'):
+                code, out, err = self.cli(self.beta, 'where', **{var: value})
+                self.assertEqual(code, 0, (key, err))
+                self.assertIn(str(self.beta / default), out)
+                for part in ('ignoring ' + key, var, str(self.beta / '.claude' / 'claude-mods.json')):
+                    self.assertIn(part, err)
+        self.assertFalse(any(self.alpha.glob('x.db')))
+
+    def test_the_workspace_file_beats_the_environment_and_the_map_applies_only_inside_its_path(self):
+        (self.home / '.claude' / 'claude-mods.json').write_text(json.dumps({'workspaces': {
+            str(self.beta): {'task-tracker': {'dbPath': 'mapped/t.db', 'idPrefix': 'BETA'}}}}))
+        w = self.where(self.beta, TASKS_DB='env/t.db')
+        self.assertEqual((w['db'], w['prefix']), (str(self.beta / 'mapped' / 't.db'), 'BETA'))
+        self.assertEqual(self.where(self.alpha)['db'], str(self.alpha / '.claude/tasks/tasks.db'))
+        self.section(self.beta, 'task-tracker', dbPath='own/t.db')
+        w = self.where(self.beta, TASKS_DB='env/t.db')
+        self.assertEqual((w['db'], w['prefix']), (str(self.beta / 'own' / 't.db'), 'BETA'))
 
     def test_environment_paths_inside_still_work_with_a_warning(self):
         code, out, err = self.cli(self.beta, 'where', TASKS_DB='x/t.db')
@@ -233,7 +245,7 @@ class TaskPathsTest(Places):
     def old_option(self, name, **options):
         (self.home / '.claude' / 'settings.json').write_text(json.dumps({'pluginConfigs': {name: {'options': options}}}))
 
-    def test_old_options_warn_inside_and_are_refused_outside(self):
+    def test_old_options_warn_inside_and_are_ignored_outside(self):
         for name in ('task-tracker', 'task-tracker@claude-mods'):
             self.old_option(name, dbPath='x/t.db')
             code, out, err = self.cli(self.beta, 'where')
@@ -241,9 +253,10 @@ class TaskPathsTest(Places):
             self.assertIn(str(self.beta / 'x' / 't.db'), out)
             self.assertIn('dbPath comes from a plugin option', err)
             self.old_option(name, dbPath=str(self.alpha / 't.db'))
-            code, _, err = self.unchanged(self.beta, 'init')
-            self.assertEqual(code, 2)
-            self.assertIn('refusing dbPath', err)
+            code, out, err = self.cli(self.beta, 'where')
+            self.assertEqual(code, 0)
+            self.assertIn('ignoring dbPath', err)
+            self.assertIn(str(self.beta / '.claude/tasks/tasks.db'), out)
 
     def test_an_importer_outside_stops_only_import(self):
         env = {'TASKS_IMPORTERS': str(self.alpha / 'x.py')}
