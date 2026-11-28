@@ -4,6 +4,7 @@ Resolution order, highest first:
   1. command-line flags typed by a person (--db, --roles, --prefix, --labels, --importers, --notify-cmd)
   2. the project file <project root>/.claude/claude-mods.json, section "task-tracker"
      (keys: idPrefix, dbPath, rolesFile, labels, importers, notifyCommand)
+  2b. the user's per-workspace map, ~/.claude/claude-mods.json "workspaces" (see project.py), same keys
   3. environment variables (TASKS_DB, TASKS_ROLES, TASKS_PREFIX, TASKS_LABELS, TASKS_IMPORTERS, TASKS_NOTIFY_CMD);
      the Claude Code plugin sets these from its options at session start
   4. the defaults below
@@ -12,7 +13,7 @@ The project file beats the environment: a project's own settings win over one us
 
 The project root is the nearest ancestor of the working directory holding .git or .claude, else the working
 directory (see project.py: a git worktree without its own section uses its main checkout, a coordinator's worker uses
-the coordinator's project). The environment may not point dbPath or rolesFile outside the project. Relative paths (dbPath, rolesFile, an importer's .py path) resolve against the project root.
+the coordinator's project). An environment dbPath or rolesFile outside the project is ignored (another project's session may have left it). Relative paths (dbPath, rolesFile, an importer's .py path) resolve against the project root.
 """
 from __future__ import annotations
 
@@ -87,6 +88,7 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
         except (OSError, ValueError) as e:
             raise SystemExit(f'error: {pf} is not valid JSON: {e}')
     old = projects.old_options(SECTION, PATHS, env)
+    mine = proj.user_section(SECTION, env)
     values, sources = {}, {}
     for key, default in DEFAULTS.items():
         if flags.get(key) is not None:
@@ -95,6 +97,10 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
             v = project[key]
             values[key] = ','.join(v) if isinstance(v, list) else str(v)
             sources[key] = 'project'
+        elif mine.get(key) is not None:
+            v = mine[key]
+            values[key] = ','.join(v) if isinstance(v, list) else str(v)
+            sources[key] = 'workspaces'
         elif env.get(ENV[key]) is not None and (env[ENV[key]] or key not in PATHS):
             values[key], sources[key] = env[ENV[key]], 'env'
         elif key in old:
@@ -102,10 +108,10 @@ def load(flags: Optional[dict] = None, env: Optional[dict] = None, cwd: Optional
         else:
             values[key], sources[key] = default, 'default'
 
-    for key in PATHS:
-        if sources[key] == 'env':
-            proj.check_env('task-tracker', SECTION, key, ENV[key], values[key], DEFAULTS[key],
-                           {'dbPath': '--db', 'rolesFile': '--roles'}[key])
+    for key in PATHS:  # an environment path outside the project (another project's, inherited) is ignored
+        if sources[key] == 'env' and not proj.check_env('task-tracker', SECTION, key, ENV[key], values[key],
+                                                        DEFAULTS[key], {'dbPath': '--db', 'rolesFile': '--roles'}[key]):
+            values[key], sources[key] = DEFAULTS[key], 'default'
     refused = ''
     if sources['importers'] == 'env':  # only `import` runs them, so only `import` is refused
         for entry in _split(values['importers']):

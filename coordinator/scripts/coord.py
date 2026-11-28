@@ -22,9 +22,10 @@
     python coord.py resume [--dry-run]                  respawn the paused lanes from their cards
     python coord.py config                              the resolved configuration
 
-Configuration (first match wins): flags > <project>/.claude/claude-mods.json "coordinator" > environment
-(COORD_<KEY>; the plugin's options arrive this way) > defaults. Paths (busDir, cardsDir, ..., repos) belong to one
-project: the environment may not point them outside it. A git worktree without its own section uses its main
+Configuration (first match wins): flags > <project>/.claude/claude-mods.json "coordinator" > the user's per-workspace
+map (~/.claude/claude-mods.json "workspaces", see project.py) > environment (COORD_<KEY>; the plugin's options arrive
+this way) > defaults. Paths (busDir, cardsDir, ..., repos) belong to one project: an environment path outside it is
+ignored (another project's session may have left it). A git worktree without its own section uses its main
 checkout's; a worker (COORD_LANE, set by spawn) uses its coordinator's project. Keys: see DEFAULTS. `init` writes the resolved
 values into the project file, so every worker, shell or not, shares them.
 """
@@ -151,7 +152,11 @@ class Config(dict):
             if v:
                 self[k] = v
                 from_env.add(k)
-        if self.file.exists():  # the project's own file beats the environment (the plugin's options arrive as env)
+        mine = {k: v for k, v in self.project.user_section('coordinator').items() if k in DEFAULTS}
+        if mine:  # the user's per-workspace options beat this session's (the plugin's options arrive as env)
+            self.update(mine)
+            from_env -= set(mine)
+        if self.file.exists():  # the project's own file beats everything but flags
             try:
                 section = json.loads(self.file.read_text(encoding='utf-8')).get('coordinator') or {}
                 for k in section:
@@ -169,10 +174,13 @@ class Config(dict):
             if v not in (None, ''):
                 self[k] = v
                 from_env.discard(k)
-        for k in PATHS + ('repos',):
+        for k in PATHS + ('repos',):  # an environment path outside the project (another project's) is ignored
             if k in from_env:
-                for v in str(self[k]).split(',') if k == 'repos' else [self[k]]:
-                    self.project.check_env('coordinator', 'coordinator', k, env_key(k), v.strip(), DEFAULTS[k])
+                vals = [v.strip() for v in str(self[k]).split(',')] if k == 'repos' else [self[k]]
+                kept = [v for v in vals if self.project.check_env('coordinator', 'coordinator', k, env_key(k), v,
+                                                                  DEFAULTS[k])]
+                if kept != vals:
+                    self[k] = ','.join(kept) if k == 'repos' and kept else DEFAULTS[k]
         for k in INTS:
             self[k] = int(self[k])
         for k in FLOATS + FLOATS_EXTRA:
@@ -1280,7 +1288,7 @@ def cmd_reap(cfg, args):
 
 
 def cmd_ask(cfg, args):
-    frm = take(args, '--from') or os.environ.get('AGENT_BUS_ROLE') or 'coordinator'
+    frm = take(args, '--from') or project.env_role() or 'coordinator'
     opts = take(args, '--options')
     pos = args  # free text, flag-like words included
     if not pos:
@@ -1884,7 +1892,7 @@ def cmd_pause(cfg, args):
 
 
 def cmd_paused(cfg, args):
-    role = take(args, '--role') or os.environ.get('AGENT_BUS_ROLE')
+    role = take(args, '--role') or project.env_role()
     if not role:
         raise SystemExit('coordinator: paused: who are you? pass --role or set AGENT_BUS_ROLE')
     st = load_pause(cfg)
@@ -1935,7 +1943,7 @@ def take(args, flag):
 
 def cmd_context(cfg, args):
     """JSON for the plugin's session-start hook: is this project coordinated, and who is this session."""
-    role = os.environ.get('AGENT_BUS_ROLE') or ''
+    role = project.env_role() or ''
     configured = cfg.file.exists() and 'coordinator' in json.loads(cfg.file.read_text(encoding='utf-8') or '{}')
     lanes = load_lanes(cfg) if configured else {}
     card = cfg.path('cardsDir') / f'{role}.md'

@@ -19,13 +19,15 @@
     python bus.py global status|log [--n N]              the global pause state, or the last N global messages
     every other orca-bus verb passes through: register, who, status, react, thread, sub, pin, edit, delete, ...
 
-Configuration (first match wins): flags > <project>/.claude/claude-mods.json "agent-bus" > environment
-(the plugin's options arrive as environment variables) > defaults.
+Configuration (first match wins): flags > <project>/.claude/claude-mods.json "agent-bus" > the user's per-workspace
+map (~/.claude/claude-mods.json "workspaces", see project.py) > environment (the plugin's options arrive as
+environment variables) > defaults.
     --dir / AGENT_BUS_DIR            bus directory (default .claude/bus under the project root)
-                                     (the environment may not point it, or AGENT_BUS_TASKS_DB, outside the project; a
+                                     (an environment value outside the project, or AGENT_BUS_TASKS_DB's, is ignored; a
                                      git worktree without its own section uses its main checkout's bus; a worker uses
                                      its coordinator's project, which COORD_LANE names)
-    AGENT_BUS_ROLE                   this session's role (also ORCA_BUS_NAME, or the registry entry for the
+    AGENT_BUS_ROLE                   this session's role, unless COORD_LANE names another project's lane (also
+                                     ORCA_BUS_NAME, or the registry entry for the
                                      terminal handle: ORCA_TERMINAL_HANDLE, or HERDR_PANE_ID inside herdr)
     AGENT_BUS_ORCA_BUS_PATH          a checkout of orca-bus to import from (else the installed package)
     AGENT_BUS_BACKEND                orca | herdr | auto | none: who may type urgent mail into a terminal (default
@@ -150,8 +152,13 @@ def load_config(flags=None, root=None, init=False, start=None):
         if os.environ.get(var) or old.get(k):
             cfg[k] = os.environ.get(var) or old[k]
             from_env.add(k)
+    mine = proj.user_section('agent-bus')
+    if mine:  # the user's per-workspace options beat this session's (the plugin's options arrive as env)
+        section = project_keys(mine, project.user_folder() / project.FILE.name)
+        cfg.update(section)
+        from_env -= set(section)
     p = proj.file
-    if p.exists():  # the project's own file beats the environment (the plugin's options arrive as env)
+    if p.exists():  # the project's own file beats everything but flags
         try:
             section = project_keys(json.loads(p.read_text(encoding='utf-8')).get('agent-bus') or {}, p)
             cfg.update(section)
@@ -162,15 +169,13 @@ def load_config(flags=None, root=None, init=False, start=None):
         if v not in (None, ''):
             cfg[k] = v
             from_env.discard(k)
-    if 'dir' in from_env:
-        proj.check_env('agent-bus', 'agent-bus', 'busDir', ENV['dir'], cfg['dir'], DEFAULTS['dir'],
-                       '--dir')
-    if 'tasksDb' in from_env:
-        try:
-            proj.check_env('agent-bus', 'agent-bus', 'tasksDb', ENV['tasksDb'], cfg['tasksDb'], '')
-        except project.Refused as ex:  # the chat only lists its tasks: the bus works without it
-            print(ex, file=sys.stderr)
-            cfg['tasksDb'] = ''
+    # an environment path outside the project (another project's, inherited) is ignored
+    if 'dir' in from_env and not proj.check_env('agent-bus', 'agent-bus', 'busDir', ENV['dir'], cfg['dir'],
+                                                DEFAULTS['dir'], '--dir'):
+        cfg['dir'] = DEFAULTS['dir']
+    if 'tasksDb' in from_env and not proj.check_env('agent-bus', 'agent-bus', 'tasksDb', ENV['tasksDb'],
+                                                    cfg['tasksDb'], ''):
+        cfg['tasksDb'] = ''
     d = Path(cfg['dir'])
     cfg['dir'] = str(d if d.is_absolute() else root / d)
     cfg['nudgeAfter'] = float(cfg['nudgeAfter'])
@@ -222,7 +227,7 @@ def join_text(*parts):
 
 
 def env_role():
-    return os.environ.get('AGENT_BUS_ROLE') or os.environ.get('ORCA_BUS_NAME') or None
+    return project.env_role() or os.environ.get('ORCA_BUS_NAME') or None
 
 
 def broadcast_verb(argv, cfg, role):
@@ -662,7 +667,7 @@ def ensure_deliver(root, cfg, now=None, start=None):
 
 
 def resolve_role(bus, explicit=None):
-    for v in (explicit, os.environ.get('AGENT_BUS_ROLE'), os.environ.get('ORCA_BUS_NAME')):
+    for v in (explicit, project.env_role(), os.environ.get('ORCA_BUS_NAME')):
         if v:
             return v
     return bus.name_for_handle(term_handle())

@@ -220,33 +220,63 @@ class BusPathsTest(Places):
             self.assertEqual(code, 2, args)
             self.assertTrue(err)
 
-    def test_environment_paths_outside_the_project_are_refused(self):
+    def test_an_inherited_bus_dir_of_another_project_is_ignored(self):
+        # a terminal or daemon started from alpha's session hands its env to a session in beta
         self.cli(self.alpha, 'init')
+        self.cli(self.beta, 'init', '--roles', 'x')
+        alpha_bus = tree(self.alpha)
         for value in (str(self.alpha / '.claude' / 'bus'), '../alpha/.claude/bus'):
-            for args in (['init', '--roles', 'x'], ['send', 'coordinator', 'hi', '--from', 'x'], ['who']):
-                code, _, err = self.unchanged(self.beta, *args, AGENT_BUS_DIR=value)
-                self.assertEqual(code, 2, args)
-                for part in ('busDir', 'AGENT_BUS_DIR', str(self.beta / '.claude' / 'claude-mods.json')):
-                    self.assertIn(part, err)
+            code, _, err = self.cli(self.beta, 'send', 'x', 'hi', '--from', 'x', AGENT_BUS_DIR=value)
+            self.assertEqual(code, 0, err)
+            for part in ('ignoring busDir', 'AGENT_BUS_DIR', str(self.beta / '.claude' / 'claude-mods.json')):
+                self.assertIn(part, err)
+        self.assertEqual(tree(self.alpha), alpha_bus)
+        self.assertIn('hi', self.cli(self.beta, 'digest', '--as', 'x')[1])
 
-    def test_the_hook_says_why_and_leaves_the_bus_alone(self):
+    def test_the_workspace_file_beats_the_environment(self):
+        self.section(self.beta, 'agent-bus', busDir='tmp/bus')
+        code, out, _ = self.cli(self.beta, 'init', AGENT_BUS_DIR=str(self.beta / 'other'))
+        self.assertEqual(code, 0)
+        self.assertIn(f'init writes: {self.beta / "tmp" / "bus"}', out)
+
+    def test_the_per_workspace_map_applies_only_inside_its_path(self):
+        (self.home / '.claude' / 'claude-mods.json').write_text(json.dumps({'workspaces': {
+            str(self.beta): {'agent-bus': {'busDir': 'tmp/mapped'}},
+            str(self.home / 'al*'): {'agent-bus': {'busDir': 'tmp/globbed'}},
+        }}))
+        self.assertIn(f'init writes: {self.beta / "tmp" / "mapped"}', self.cli(self.beta, 'init')[1])
+        self.assertIn(f'init writes: {self.alpha / "tmp" / "globbed"}', self.cli(self.alpha, 'init')[1])
+        (self.home / 'gamma').mkdir()
+        self.git(self.home / 'gamma', 'init', '-q')
+        self.assertIn(f'init writes: {self.home / "gamma" / ".claude" / "bus"}', self.cli(self.home / 'gamma', 'init')[1])
+        # the workspace's own file still wins over the map, and the map over this session's options
+        self.section(self.beta, 'agent-bus', busDir='tmp/own')
+        self.assertIn(f'init writes: {self.beta / "tmp" / "own"}', self.cli(self.beta, 'init', AGENT_BUS_DIR='x')[1])
+        self.assertIn(f'init writes: {self.alpha / "tmp" / "globbed"}', self.cli(self.alpha, 'init', AGENT_BUS_DIR='x')[1])
+
+    def test_an_inherited_lane_role_of_another_project_is_ignored(self):
+        lane = {'COORD_LANE': f'{self.alpha}#worker1', 'AGENT_BUS_ROLE': 'worker1'}
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(project.env_role(self.beta, lane), None)
+            self.assertEqual(project.env_role(self.lane, lane), 'worker1')
+            self.assertEqual(project.env_role(self.beta, {'AGENT_BUS_ROLE': 'me'}), 'me')
+
+    def test_the_hook_ignores_another_projects_bus(self):
         self.cli(self.alpha, 'init')
-        before = tree(self.top)
+        before = tree(self.alpha)
         out = self.hook(self.beta, AGENT_BUS_DIR=str(self.alpha / '.claude' / 'bus'), AGENT_BUS_ROLE='coordinator')
-        self.assertEqual((out['bus'], tree(self.top)), (False, before))
-        self.assertIn('busDir', out['refused'])
+        self.assertEqual((out['bus'], tree(self.alpha)), (False, before))
 
-    def test_a_refused_bus_leaves_the_global_channel_on(self):
+    def test_an_ignored_bus_leaves_the_global_channel_on(self):
         env = {'AGENT_BUS_DIR': str(self.alpha / 'bus'), 'AGENT_BUS_GLOBAL_DIR': str(self.top / 'global')}
         self.assertEqual(self.cli(self.beta, 'broadcast', '--pause', 'too', 'hot', '--no-piforge', '--from', 'a', **env)[0], 0)
         self.assertIn('too hot', self.cli(self.beta, 'global', 'status', **env)[1])
         out = json.loads(self.cli(self.beta, 'hook', '--event', 'SessionStart', '--session', 's', **env)[1])
         self.assertIn('too hot', out['text'])
-        self.assertIn('busDir', out['refused'])
-        self.assertEqual((out['bus'], out['dir']), (False, None))
+        self.assertEqual(out['bus'], False)
         self.assertFalse((self.alpha / 'bus').exists())
 
-    def test_a_refusal_says_what_a_running_lane_can_do(self):
+    def test_the_note_says_what_a_running_lane_can_do(self):
         err = self.cli(self.beta, 'who', AGENT_BUS_DIR=str(self.alpha / 'bus'))[2]
         self.assertIn(f'--dir {self.alpha / "bus"}', err)
 
@@ -280,7 +310,7 @@ class BusPathsTest(Places):
         self.cli(self.beta, 'init')
         code, _, err = self.cli(self.beta, 'whoami', '--as', 'x', AGENT_BUS_TASKS_DB=str(self.alpha / 't.db'))
         self.assertEqual(code, 0)
-        self.assertIn('refusing tasksDb', err)
+        self.assertIn('ignoring tasksDb', err)
 
     def test_environment_paths_inside_still_work_with_a_warning(self):
         code, out, err = self.cli(self.beta, 'init', AGENT_BUS_DIR='tmp/bus')
@@ -291,16 +321,17 @@ class BusPathsTest(Places):
     def old_option(self, name, **options):
         (self.home / '.claude' / 'settings.json').write_text(json.dumps({'pluginConfigs': {name: {'options': options}}}))
 
-    def test_old_options_warn_inside_and_are_refused_outside(self):
+    def test_old_options_warn_inside_and_are_ignored_outside(self):
         for name in ('agent-bus', 'agent-bus@claude-mods'):
             self.old_option(name, busDir='tmp/bus')
             code, _, err = self.cli(self.beta, 'who')
             self.assertIn('busDir comes from a plugin option', err)
             self.assertIn(str(self.beta / 'tmp' / 'bus'), err)
             self.old_option(name, busDir=str(self.alpha / 'bus'))
-            code, _, err = self.unchanged(self.beta, 'init')
-            self.assertEqual(code, 2)
-            self.assertIn('refusing busDir', err)
+            code, out, err = self.cli(self.beta, 'init')
+            self.assertEqual(code, 0)
+            self.assertIn('ignoring busDir', err)
+            self.assertIn(f'init writes: {self.beta / ".claude" / "bus"}', out)
 
     def test_the_terminal_client_finds_the_same_bus(self):
         def find(cwd, **env):
@@ -312,8 +343,8 @@ class BusPathsTest(Places):
             self.assertEqual(find(cwd).stdout.strip(), str(self.alpha / 'tmp' / 'bus'))
         self.assertEqual(find(self.beta).stdout.strip(), str(self.beta / '.claude' / 'bus'))
         r = find(self.beta, AGENT_BUS_DIR=str(self.alpha / 'tmp' / 'bus'))
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('refusing busDir', r.stderr)
+        self.assertEqual(r.stdout.strip(), str(self.beta / '.claude' / 'bus'))
+        self.assertIn('ignoring busDir', r.stderr)
 
     def test_init_refuses_a_folder_outside(self):
         for args in (['--dir', str(self.alpha / 'bus'), 'init'], ['init', '--dir', '../alpha/bus']):

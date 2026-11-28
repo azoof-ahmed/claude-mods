@@ -36,10 +36,24 @@ Every mod reads its settings in this order, first match wins:
 
 1. flags you type on its CLI;
 2. the project's `.claude/claude-mods.json`, one section per mod (for example `"coordinator": {...}`), which `coordinator init` writes;
-3. the plugin options (`/config`, or `pluginConfigs["<mod>"].options` in settings), which reach the CLIs as environment variables;
-4. the defaults.
+3. your per-workspace map in `~/.claude/claude-mods.json` (agent-bus, coordinator and task-tracker), for options you keep at user level but that differ per workspace;
+4. the plugin options (`/config`, or `pluginConfigs["<mod>"].options` in settings), which reach the CLIs as environment variables;
+5. the defaults.
 
-So your plugin options are your defaults everywhere, and a repo can override them for everyone working in it. Paths (bus, cards, tracker and the like) are set per project only: one that comes from an option or the environment is refused when it points outside the project.
+So your plugin options are your defaults everywhere, and a repo can override them for everyone working in it. Keep workspace-specific settings in the workspace's own file, not in the plugin options: those are shared by every workspace.
+
+Paths (bus, cards, tracker and the like) belong to one project. One that comes from an option or the environment and points outside the project is ignored, with a note. It may have been inherited from another project's session, for example through a terminal, multiplexer or daemon started there. The setting then falls back to the project's file or the default. Likewise, an `AGENT_BUS_ROLE` that arrives with a `COORD_LANE` for another project is ignored.
+
+The per-workspace map: each key is an absolute path (or a glob) and applies only inside it. A longer key beats a shorter one.
+
+```json
+{
+  "workspaces": {
+    "/Users/me/projects/clarity": { "agent-bus": { "roles": "coordinator,scheduler" } },
+    "/Users/me/projects/*": { "coordinator": { "maxLanes": 2 } }
+  }
+}
+```
 
 ## Develop
 

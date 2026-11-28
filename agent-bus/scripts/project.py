@@ -10,8 +10,18 @@ The same file ships with coordinator, agent-bus and task-tracker (each plugin in
   over the folder's own section and state, for a mod the project uses, in that project's repository (its worktrees
   included), in the repository its lane record names and in the project's `repos`. Nowhere else, and never for `init`.
 - A path that comes from the environment (the plugins' options arrive there) must lie in the project or its main
-  checkout. Paths in the project's own file and typed flags may point anywhere.
+  checkout. One that doesn't was inherited from another project's session (a terminal, multiplexer or daemon started
+  there) or exported by hand: it is ignored with a note, and the setting falls back to the project's file or the
+  default. Paths in the project's own file, in the user's per-workspace map and typed flags may point anywhere.
+- Per-workspace options kept at user level: the user's ~/.claude/claude-mods.json (CLAUDE_CONFIG_DIR is honoured)
+  {"workspaces": {"<abs path or glob>": {"<mod>": {...}}}}. An entry applies only inside its folder (or to folders the
+  glob matches); a longer key beats a shorter one, and the project's own file beats them all.
+- AGENT_BUS_ROLE that arrives with a COORD_LANE naming another project belongs to that project's lane: ignored here.
+
+Precedence, first match wins: typed flags > the project's file > the user's per-workspace map > this session's plugin
+options (environment) > defaults.
 """
+import fnmatch
 import json
 import os
 import re
@@ -123,18 +133,26 @@ class Project:
         return any(under(self.root / p, d) for d in self.places)
 
     def check_env(self, mod, section, key, var, value, default, flag=None):
-        """Refuse an environment path outside the project; warn about one inside it."""
+        """Whether an environment path may be used: False (with a note) for one outside the project, which another
+        project's session or a shell export left behind; True, with a warning, for one inside it."""
         if value == default:
-            return
+            return True
         fix = f'set "{key}" in the "{section}" section of {self.file}'
         if not self.holds(value):
-            raise Refused(f'{mod}: refusing {key}={value} (the {key} plugin option, or {var} in the environment): it '
-                          f'is outside this project ({self.root}). To use it here, {fix}; and remove the {key} option '
-                          f'from your user settings (pluginConfigs["{section}"].options).'
-                          + (f' A session that a coordinator started before this version: use `{flag} {value}` with '
-                             f'each command, or have it respawned.' if flag else ''))
+            print(f'{mod}: ignoring {key}={value} (the {key} plugin option, or {var} in the environment, maybe '
+                  f'inherited from another project\'s session): it is outside this project ({self.root}). To use it '
+                  f'here, {fix}'
+                  + (f', or pass `{flag} {value}`' if flag else '')
+                  + f'; and remove the {key} option from your user settings (pluginConfigs["{section}"].options).',
+                  file=sys.stderr)
+            return False
         print(f'{mod}: {key} comes from a plugin option or {var}; paths belong to one project, and the next version '
               f'stops reading them there: {fix}.', file=sys.stderr)
+        return True
+
+    def user_section(self, section, env=None):
+        """This workspace's entries for `section` in the user's per-workspace map (see the module doc)."""
+        return workspace_options(section, [self.root, *self.places], env)
 
     def refuse_outside(self, mod, files):
         """`init` writes only in the project."""
@@ -148,18 +166,60 @@ def old_options(section, keys, env=None):
     """Path options left in the user's settings (pluginConfigs["<mod>"] or ["<mod>@<marketplace>"]). The plugins no
     longer declare them, so Claude Code does not hand them over; read for one more version, checked like the
     environment."""
-    env = os.environ if env is None else env
-    base = env.get('HOME') or env.get('USERPROFILE')
-    folder = env.get('CLAUDE_CONFIG_DIR') or (base and os.path.join(base, '.claude'))
+    folder = user_folder(env)
     out = {}
     try:
-        configs = json.loads((Path(folder) / 'settings.json').read_text(encoding='utf-8'))['pluginConfigs']
+        configs = json.loads((folder / 'settings.json').read_text(encoding='utf-8'))['pluginConfigs']
         for name, conf in configs.items():
             if name.split('@')[0] == section:
                 out.update({k: v for k, v in (conf.get('options') or {}).items() if k in keys and v and isinstance(v, str)})
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
     return out
+
+
+def user_folder(env=None):
+    env = os.environ if env is None else env
+    base = env.get('HOME') or env.get('USERPROFILE')
+    folder = env.get('CLAUDE_CONFIG_DIR') or (base and os.path.join(base, '.claude'))
+    return Path(folder) if folder else None
+
+
+def workspace_matches(key, folders):
+    """Whether a per-workspace key (an absolute path, `~` allowed, or a glob) covers one of `folders`."""
+    key = os.path.expanduser(str(key))
+    if not os.path.isabs(key):
+        return False
+    if any(c in key for c in '*?['):
+        return any(fnmatch.fnmatchcase(os.path.realpath(f), key) or fnmatch.fnmatchcase(str(f), key) for f in folders)
+    return any(under(f, key) for f in folders)
+
+
+def workspace_options(section, folders, env=None):
+    """The user's per-workspace options for `section` that cover `folders`; a longer key wins."""
+    folder = user_folder(env)
+    try:
+        spaces = json.loads((folder / FILE.name).read_text(encoding='utf-8')).get('workspaces') or {}
+        items = sorted(spaces.items(), key=lambda kv: len(str(kv[0])))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+    out = {}
+    for key, entry in items:
+        mine = entry.get(section) if isinstance(entry, dict) else None
+        if isinstance(mine, dict) and workspace_matches(key, folders):
+            out.update(mine)
+    return out
+
+
+def env_role(start=None, env=None):
+    """AGENT_BUS_ROLE, unless it came with a COORD_LANE for another project (an inherited lane identity)."""
+    env = os.environ if env is None else env
+    role = env.get('AGENT_BUS_ROLE') or None
+    if role and env.get(HANDOVER) and handed_over(find_root(start), env) is None:
+        print(f'ignoring AGENT_BUS_ROLE={role}: it belongs to the lane {env.get(HANDOVER)}, another project\'s',
+              file=sys.stderr)
+        return None
+    return role
 
 
 def section_of(root, section):
